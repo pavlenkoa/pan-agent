@@ -115,15 +115,12 @@ spec:
             - port: "53"
               protocol: TCP
 
-    {{- if .Values.network.kubeApiCidr }}
-    # 2. Kubernetes API server (pod/configmap CRUD)
-    - toCIDR:
-        - {{ .Values.network.kubeApiCidr }}
-      toPorts:
-        - ports:
-            - port: "6443"
-              protocol: TCP
-    {{- end }}
+    # 2. Kubernetes API server (pod/configmap CRUD). The in-cluster client
+    # dials the kubernetes.default.svc ClusterIP, not the node's :6443 — the
+    # kube-apiserver entity resolves to whatever that actually is, instead of
+    # hardcoding an IP that's wrong for at least one of the two.
+    - toEntities:
+        - kube-apiserver
 
     # 3. Every person pod's runner (POST /turn)
     - toEndpoints:

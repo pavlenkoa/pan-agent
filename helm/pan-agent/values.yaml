@@ -40,7 +40,5 @@ network:
   transmissionNamespace: transmission
   # Emby reachability (e.g. the OrbStack host.internal range). Empty disables that egress rule.
   embyCidrs: []
-  # Kubernetes API server, needed by the operator only. Empty disables that egress rule.
-  kubeApiCidr: ""
   # Private ranges excluded from the pods' "allow all internet" egress rule.
   excludeCidrs: []
