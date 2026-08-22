@@ -10,14 +10,17 @@ import { log } from '../shared/log.js';
 import type { OperatorConfig } from './config.js';
 import { deletePod, listPersonPods } from './k8s.js';
 import { ensureTrackingDir } from './nfs.js';
-import { ensurePeopleIndex } from './people-index.js';
-import { ensurePersonPod } from './pod-lifecycle.js';
+import { backfillTasksTokens, ensurePeopleIndex } from './people-index.js';
+import { ensurePersonPod, recreatePod } from './pod-lifecycle.js';
 
 const PERSON_LABEL = 'pan-agent.pavlenko.io/person';
 
 export async function bootReconcile(api: CoreV1Api, cfg: OperatorConfig): Promise<void> {
-  const idx = await ensurePeopleIndex(api, cfg.namespace);
+  await ensurePeopleIndex(api, cfg.namespace);
   await ensureTrackingDir();
+  // Approved before PERSON_TASKS_TOKEN existed: mint one, then recreate their
+  // pod below — env vars can't be patched into an already-running container.
+  const { idx, backfilled } = await backfillTasksTokens(api, cfg.namespace);
 
   const pods = await listPersonPods(api, cfg.namespace);
   const podSlugs = new Map<string, string>(); // slug -> pod name
@@ -35,7 +38,13 @@ export async function bootReconcile(api: CoreV1Api, cfg: OperatorConfig): Promis
 
   for (const [slug, person] of Object.entries(idx.people)) {
     if (person.status !== 'active') continue;
-    if (podSlugs.has(slug)) continue;
+    if (podSlugs.has(slug)) {
+      if (backfilled.has(slug)) {
+        log.line('reconcile_recreating_pod_for_token', { person: slug });
+        await recreatePod(api, cfg, slug, person.chatId, person.tz, person.tasksToken);
+      }
+      continue;
+    }
     log.line('reconcile_creating_pod', { person: slug });
     await ensurePersonPod(api, cfg, slug, person.chatId, person.tz, person.tasksToken);
   }

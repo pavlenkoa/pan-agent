@@ -91,6 +91,29 @@ export async function approvePerson(
   return { idx, entry };
 }
 
+/**
+ * Mints a tasksToken for any active person who doesn't have one yet (i.e.
+ * approved before that field existed). Returns the updated index plus the
+ * set of slugs that were just backfilled, so the caller can recreate their
+ * pods — an existing running pod's env can't be patched, only replaced.
+ */
+export async function backfillTasksTokens(
+  api: CoreV1Api,
+  namespace: string,
+): Promise<{ idx: PeopleIndex; backfilled: Set<string> }> {
+  const backfilled = new Set<string>();
+  const idx = await mutatePeopleIndex(api, namespace, (idx) => {
+    for (const [slug, entry] of Object.entries(idx.people)) {
+      if (!entry.tasksToken) {
+        entry.tasksToken = randomBytes(32).toString('hex');
+        backfilled.add(slug);
+      }
+    }
+    return idx;
+  });
+  return { idx, backfilled };
+}
+
 export async function denyPerson(api: CoreV1Api, namespace: string, telegramUserId: number): Promise<PeopleIndex> {
   return mutatePeopleIndex(api, namespace, (idx) => {
     idx.denied[String(telegramUserId)] = { deniedAt: new Date().toISOString() };
