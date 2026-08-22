@@ -22,9 +22,11 @@ src/
               replies, schedule_task/list_tasks/cancel_task MCP tools
 ```
 
-Deploy manifests live in the homelab repo under
-`kubernetes/apps/pan-agent/` — this repo only builds the image
-(`ghcr.io/pavlenkoa/pan-agent`).
+This repo builds the image (`ghcr.io/pavlenkoa/pan-agent`) and owns the
+deploy manifests: `helm/pan-agent/` is the Helm chart ArgoCD pulls directly
+(multi-source Application — environment-specific values, e.g. node/NFS/network
+CIDRs, come from the deploying cluster's GitOps repo; see homelab's
+`kubernetes/apps/pan-agent/values/homelab.yaml`).
 
 ## Develop
 
@@ -38,11 +40,13 @@ npm run build   # -> dist/operator/index.js, dist/runner/index.js
 ## Configuration
 
 Operator (required env): `PERSON_POD_IMAGE`, `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_ADMIN_ID`. See `src/operator/config.ts` for every override
-(`NAMESPACE`, `NFS_SERVER`, `NFS_ROOT_PATH`, `NFS_MOUNT_PATH`,
-`SWEEP_INTERVAL_MS`, `CATCH_UP_WINDOW_MS`, `PERSONA_CONFIGMAP_NAME`,
-`MEDIA_PVC_NAME`, `PERSON_POD_NODE`, `DEFAULT_TZ`, `TASKS_API_PORT`,
-`POD_READY_TIMEOUT_MS`).
+`TELEGRAM_ADMIN_ID`. Optional: `TELEGRAM_ALLOWED_IDS` — a JSON array of
+Telegram user ids (e.g. `["333141234","7760060740"]`) that skip the
+pending/approve bootstrap and get provisioned immediately on first message.
+See `src/operator/config.ts` for every override (`NAMESPACE`, `NFS_SERVER`,
+`NFS_ROOT_PATH`, `NFS_MOUNT_PATH`, `SWEEP_INTERVAL_MS`, `CATCH_UP_WINDOW_MS`,
+`PERSONA_CONFIGMAP_NAME`, `MEDIA_PVC_NAME`, `PERSON_POD_NODE`, `DEFAULT_TZ`,
+`TASKS_API_PORT`, `POD_READY_TIMEOUT_MS`).
 
 Runner (required env, all set by the operator's pod template): `PERSON_SLUG`,
 `PERSON_CHAT_ID`, `OPERATOR_TASKS_URL`, `TELEGRAM_BOT_TOKEN`,
@@ -50,21 +54,25 @@ Runner (required env, all set by the operator's pod template): `PERSON_SLUG`,
 
 ## First deploy (summary — see the architecture doc's migration path for the full sequence)
 
+pan-agent runs its own Telegram bot (**@shanovnybot**, display name "Пан
+Агент"), independent of `claude-code`'s bot — both can run at once, no
+scale-down needed.
+
 1. Build & push the image (CI does this on push to `main`).
 2. On the Pi: `mkdir -p /media/pan-agent/{people,tracking}`, migrate existing
    `~/.claude`/workspace/tracking data from `/media/claude-code` and
    `/media/openclaw` if applicable.
 3. `claude setup-token` once, interactively; `vault kv put kv/anthropic
-   claude_oauth_token=...`; add `telegram_admin_id` to `kv/telegram`.
-4. Pin `PERSON_POD_IMAGE` / the operator container's image to a real digest
-   in `kubernetes/apps/pan-agent/operator-deployment.yaml` (placeholder
+   claude_oauth_token=...`. `telegram_bot_pan_agent_token`,
+   `telegram_admin_id`, and `telegram_allowed_ids` already live in
+   `kv/telegram`.
+4. Pin `PERSON_POD_IMAGE` / the operator container's image to a real digest in
+   homelab's `kubernetes/apps/pan-agent/values/homelab.yaml` (placeholder
    `:latest` is there until the first CI build exists).
-5. Scale `claude-code` to 0 before the operator starts polling — Telegram
-   allows exactly one `getUpdates` consumer.
-6. Add `pan-agent` to app-of-apps (already done in this branch) and let
-   ArgoCD sync.
-7. Message the bot; approve yourself via the admin DM: `/approve andrii
-   <your-telegram-id>` (or self-approve if you're already `TELEGRAM_ADMIN_ID`).
+5. Push `pan-agent` to app-of-apps (already done, not yet pushed to `homelab`)
+   and let ArgoCD sync.
+6. Message @shanovnybot from one of the `telegram_allowed_ids` — you're
+   auto-approved and get a pod immediately, no `/approve` needed.
 
 ## Admin commands (DM from `TELEGRAM_ADMIN_ID`)
 

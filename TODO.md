@@ -4,8 +4,11 @@
 
 Implemented the approved architecture plan
 (`~/.claude/plans/prompt-design-a-frolicking-hennessy.md`) end to end:
-operator + runner in TypeScript, plus the homelab deploy manifests. Nothing
-is committed in either repo yet.
+operator + runner in TypeScript, plus the homelab deploy manifests. Both
+repos are committed; `pan-agent` is pushed to GitHub (CI building), and its
+Helm chart is now the source of truth for k8s manifests (see below).
+`homelab`'s `pan-agent` registration is committed locally but **not yet
+pushed** — see "Before first deploy" below.
 
 ### `~/git/pan-agent` (this repo)
 
@@ -49,50 +52,82 @@ is committed in either repo yet.
   to `ghcr.io/pavlenkoa/pan-agent`.
 - **`README.md`** — dev commands, config env vars, condensed deploy sequence.
 
-### `~/git/homelab` (uncommitted)
+### `~/git/pan-agent/helm/pan-agent` (chart, committed + pushed)
 
-- `kubernetes/apps/pan-agent/`: `rbac.yaml`, `operator-deployment.yaml` (+ Service
-  for the tasks API), `networkpolicy.yaml` (person-pod CNP + operator CNP),
-  `external-secrets.yaml` (anthropic/telegram/toloka/emby/tmdb/seedpool/github),
-  `pv.yaml` (media), `configmap-persona.yaml` (CLAUDE.md + SKILL.md, updated to
-  drop the old Telegram-plugin-reply mandate and CRON.md restore hack).
-- Registered `pan-agent` in `kubernetes/app-of-apps/values.yaml` under
-  `applications` (sync-wave 4, same as `claude-code`).
-- All YAML validated (`yaml.safe_load`), not helm-lint'd (plain manifests,
-  same pattern as `claude-code`/`transmission`).
+- All the k8s manifests (`rbac.yaml`, `operator-deployment.yaml` + Service,
+  `networkpolicy.yaml`, `external-secrets.yaml`, `pv.yaml`,
+  `configmap-persona.yaml`) moved here as a proper Helm chart — this repo has
+  its own tests/CI/Dockerfile, same shape as `vault-secrets-generator`, so it
+  gets its own chart too rather than duplicating manifests into `homelab`
+  (`directory: {}`, the pattern for thin wrapper apps like `claude-code`).
+  `helm lint` clean; `helm template` diffed byte-for-byte identical against
+  the raw manifests it replaced before they were deleted.
+- Values split: chart `values.yaml` has generic defaults, homelab-specific
+  bits (node, NFS server, network CIDRs, image tag) live in
+  `homelab`'s `kubernetes/apps/pan-agent/values/homelab.yaml`.
+
+### `~/git/homelab` (committed locally, not pushed)
+
+- `kubernetes/apps/pan-agent/values/homelab.yaml`: node/NFS/network/image
+  overrides for the chart above.
+- `kubernetes/app-of-apps/values.yaml`: `pan-agent` now uses
+  `repository:`/`path: helm/pan-agent` (multi-source Application pulling the
+  chart from the `pan-agent` repo + values from `homelab`) instead of
+  `directory: {}`. Also added `pan-agent`'s repo URL to the `applications`
+  parent's `sourceRepos` (AppProject would otherwise reject the external
+  source). Verified by rendering `app-of-apps` with `--set
+  renderParent=applications` — the generated Application matches
+  `vault-secrets-generator`'s shape exactly.
+- **Not pushed yet** — pushing triggers ArgoCD auto-sync
+  (`automated.prune: true`) and several blockers below aren't done, notably
+  `claude-code` still being up would mean two concurrent Telegram
+  `getUpdates` consumers.
 
 ## To do
 
 ### Before first deploy (blocking)
-- [ ] `git init`/commit both repos' changes once reviewed (nothing committed yet).
-- [ ] Push `pan-agent` to GitHub so CI actually builds and pushes an image —
-      `operator-deployment.yaml`'s image refs are still the `:latest`
-      placeholder, not a pinned digest.
+- [x] `git init`/commit both repos' changes.
+- [x] Push `pan-agent` to GitHub so CI actually builds and pushes an image —
+      the chart's image refs are still the `:latest` placeholder, not a
+      pinned digest.
+- [ ] Push `homelab` (currently committed locally only) once the blockers
+      below are done — this is what actually triggers ArgoCD to deploy.
 - [ ] Pin `PERSON_POD_IMAGE` and the operator container's own image to the
       real digest from that first build (Renovate takes over after).
 - [ ] `claude setup-token` (interactive, one-time) → `vault kv put kv/anthropic
       claude_oauth_token=...`.
-- [ ] Add `telegram_admin_id` to `kv/telegram` in Vault.
+- [x] Telegram bot separated from `claude-code`'s: pan-agent has its own bot,
+      **@shanovnybot** (t.me/shanovnybot, display name "Пан Агент") — token in
+      `kv/telegram` as `telegram_bot_pan_agent_token`. `claude-code` and
+      `pan-agent` run independently, each polling its own bot's `getUpdates`;
+      no need to scale `claude-code` down.
+- [x] `telegram_admin_id` (333141234) and `telegram_allowed_ids`
+      (`["333141234","7760060740","41133035"]`) added to `kv/telegram`.
+      Added `TELEGRAM_ALLOWED_IDS` support: unknown senders in that list skip
+      the pending/approve bootstrap and get provisioned immediately
+      (`src/operator/provisioning.ts`, wired into `router.ts`'s
+      `handleUnknownSender` and reused by `/approve`) — no manual per-person
+      approval needed for these three.
 - [ ] On the Pi: `mkdir -p /media/pan-agent/{people,tracking}`; migrate
       `~/.claude`/workspace from `/media/claude-code` and tracking data from
       `/media/openclaw` if carrying over history.
-- [ ] Scale `claude-code` StatefulSet to 0 before the operator starts polling
-      (only one `getUpdates` consumer allowed per bot token).
 
 ### Deploy + validate
 - [ ] Let ArgoCD sync `pan-agent`; confirm namespace/RBAC/CNPs/ExternalSecrets
       land clean.
-- [ ] `/approve andrii <telegram-id>` (or self-approve as admin); verify pod
-      creation, readiness, and first-turn round-trip end to end against a real
-      cluster — this whole flow is unit-tested in isolation but never run
-      against a live k3s + real Telegram + real Anthropic token.
+- [ ] Message @shanovnybot as one of the three allowlisted IDs; verify
+      auto-approve provisions the pod and delivers the first turn end to end
+      against a real cluster — this whole flow is unit-tested in isolation but
+      never run against a live k3s + real Telegram + real Anthropic token.
 - [ ] Verify Grafana/Loki actually picks up the stdout JSON lines with the
       expected fields (`{namespace="pan-agent"} | json`).
 - [ ] Run the four validation milestones from the architecture doc: operator
       restart amnesia, duplicate-turn (journal dedup), task double-fire
       (catch-up window), node-reboot recovery.
-- [ ] Second person end to end (`/approve marta ...`) to confirm isolation
-      (separate memory/session, shared persona/tracking).
+- [ ] Second/third person end to end (the other two allowlisted IDs
+      auto-approving) to confirm isolation (separate memory/session, shared
+      persona/tracking) and that the slug-collision fallback in
+      `uniqueSlug`/`slugifyForPerson` never triggers spuriously for real names.
 - [ ] Migrate legacy crons: ask the assistant to read `/tracking/CRON.md` once
       and recreate them via `schedule_task`, then delete `CRON.md`.
 

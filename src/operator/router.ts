@@ -8,6 +8,7 @@ import { log } from '../shared/log.js';
 import { tryHandleAdminCommand } from './admin-commands.js';
 import { enqueueChatMessage } from './delivery.js';
 import { findSlugByTelegramUserId, readPeopleIndex, recordPending, touchLastSeen } from './people-index.js';
+import { provisionPerson, slugifyForPerson, uniqueSlug } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
 import type { TelegramMessage, TelegramUpdate } from './telegram.js';
 
@@ -29,7 +30,7 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
 
   const slug = findSlugByTelegramUserId(idx, telegramUserId);
   if (!slug) {
-    await handleUnknownSender(deps, msg, telegramUserId);
+    await handleUnknownSender(deps, msg, update, telegramUserId);
     return;
   }
   const person = idx.people[slug];
@@ -44,11 +45,22 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   });
 }
 
-async function handleUnknownSender(deps: RouterDeps, msg: TelegramMessage, telegramUserId: number): Promise<void> {
+async function handleUnknownSender(
+  deps: RouterDeps,
+  msg: TelegramMessage,
+  update: TelegramUpdate,
+  telegramUserId: number,
+): Promise<void> {
   const from = msg.from;
   if (!from) return;
   const handle = from.username ? `@${from.username}` : '(no username)';
   const name = [from.first_name, from.last_name].filter(Boolean).join(' ') || handle;
+
+  if (deps.cfg.telegramAllowedIds.includes(telegramUserId)) {
+    await autoApprove(deps, msg, update, telegramUserId, handle, name);
+    return;
+  }
+
   await recordPending(deps.api, deps.cfg.namespace, telegramUserId, handle, name, msg.text ?? '');
   await deps.telegram.sendMessage(
     telegramUserId,
@@ -59,4 +71,31 @@ async function handleUnknownSender(deps: RouterDeps, msg: TelegramMessage, teleg
     `Unknown sender ${handle} (${telegramUserId}): "${msg.text ?? ''}"\n/approve <slug> ${telegramUserId} | /deny ${telegramUserId}`,
   );
   log.line('unknown_sender', { telegramUserId, handle });
+}
+
+/** telegramUserId is in TELEGRAM_ALLOWED_IDS — skip pending/approve, provision immediately. */
+async function autoApprove(
+  deps: RouterDeps,
+  msg: TelegramMessage,
+  update: TelegramUpdate,
+  telegramUserId: number,
+  handle: string,
+  name: string,
+): Promise<void> {
+  const idx = await readPeopleIndex(deps.api, deps.cfg.namespace);
+  const slug = uniqueSlug(idx, slugifyForPerson(name, telegramUserId), telegramUserId);
+  const { entry, ready } = await provisionPerson(deps, slug, telegramUserId, name);
+  await deps.telegram.sendMessage(
+    deps.cfg.telegramAdminChatId,
+    ready
+      ? `Auto-approved ${handle} (${telegramUserId}) as ${slug}.`
+      : `Auto-approved ${handle} (${telegramUserId}) as ${slug}, but pod not ready yet — check kubectl.`,
+  );
+  await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, update.update_id, {
+    messageId: msg.message_id,
+    text: msg.text ?? '',
+    fromHandle: msg.from?.username ? `@${msg.from.username}` : null,
+    date: new Date(msg.date * 1000).toISOString(),
+  });
+  log.line('person_auto_approved', { person: slug, telegramUserId });
 }

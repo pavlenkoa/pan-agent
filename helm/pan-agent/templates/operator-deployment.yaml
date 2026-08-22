@@ -65,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: pan-agent-telegram
                   key: TELEGRAM_ADMIN_ID
+            - name: TELEGRAM_ALLOWED_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: pan-agent-telegram
+                  key: TELEGRAM_ALLOWED_IDS
           ports:
             - name: tasks-api
               containerPort: {{ .Values.operator.tasksApiPort }}

@@ -4,6 +4,19 @@ function requireEnv(name: string): string {
   return v;
 }
 
+/** TELEGRAM_ALLOWED_IDS is a JSON array of Telegram user ids, e.g. ["333141234","7760060740"]. */
+function parseAllowedIds(raw: string | undefined): number[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map(Number).filter(Number.isFinite);
+}
+
 export interface OperatorConfig {
   namespace: string;
   image: string;
@@ -11,6 +24,8 @@ export interface OperatorConfig {
   nfsRootPath: string;
   telegramBotToken: string;
   telegramAdminChatId: number;
+  /** Unknown senders in this list skip the pending/approve bootstrap and are provisioned immediately. */
+  telegramAllowedIds: number[];
   tasksApiPort: number;
   sweepIntervalMs: number;
   catchUpWindowMs: number;
@@ -32,6 +47,7 @@ export function loadOperatorConfig(): OperatorConfig {
     nfsRootPath: process.env['NFS_ROOT_PATH'] ?? '/media/pan-agent',
     telegramBotToken: requireEnv('TELEGRAM_BOT_TOKEN'),
     telegramAdminChatId: Number(requireEnv('TELEGRAM_ADMIN_ID')),
+    telegramAllowedIds: parseAllowedIds(process.env['TELEGRAM_ALLOWED_IDS']),
     tasksApiPort,
     sweepIntervalMs: Number(process.env['SWEEP_INTERVAL_MS'] ?? 60_000),
     catchUpWindowMs: Number(process.env['CATCH_UP_WINDOW_MS'] ?? 6 * 60 * 60 * 1000),

@@ -6,9 +6,9 @@
  */
 import { log } from '../shared/log.js';
 import { enqueueChatMessage } from './delivery.js';
-import { approvePerson, denyPerson, readPeopleIndex } from './people-index.js';
-import { ensurePersonPod, recreatePod, waitForPodReady } from './pod-lifecycle.js';
-import { ensurePersonState } from './person-state.js';
+import { denyPerson, readPeopleIndex } from './people-index.js';
+import { recreatePod } from './pod-lifecycle.js';
+import { provisionPerson } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
 import type { TelegramUpdate } from './telegram.js';
 
@@ -57,10 +57,7 @@ async function handleApprove(deps: RouterDeps, args: string[], update: TelegramU
   const before = await readPeopleIndex(deps.api, deps.cfg.namespace);
   const pending = before.pending[idStr];
 
-  const { entry } = await approvePerson(deps.api, deps.cfg.namespace, slug, telegramUserId, deps.cfg.defaultTz);
-  await ensurePersonState(deps.api, deps.cfg.namespace, slug, pending?.name ?? slug);
-  await ensurePersonPod(deps.api, deps.cfg, slug, entry.chatId, entry.tz);
-  const ready = await waitForPodReady(deps.api, deps.cfg.namespace, slug, deps.cfg.podReadyTimeoutMs);
+  const { entry, ready } = await provisionPerson(deps, slug, telegramUserId, pending?.name ?? slug);
   await deps.telegram.sendMessage(
     admin,
     ready ? `${slug} approved and running.` : `${slug} approved, pod created, but not ready yet — check kubectl.`,
