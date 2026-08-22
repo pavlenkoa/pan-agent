@@ -80,6 +80,8 @@ export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: stri
   let newSessionId: string | null = null;
   let numTurns = 0;
   let costUsd = 0;
+  let usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; contextWindow: number } | null =
+    null;
 
   try {
     for await (const message of stream as AsyncIterable<SDKMessage & { session_id?: string }>) {
@@ -90,6 +92,7 @@ export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: stri
         numTurns = message.num_turns;
         costUsd = message.total_cost_usd;
         if (message.subtype === 'success') replyText = message.result;
+        usage = summarizeUsage(message.modelUsage);
       }
     }
   } catch (err) {
@@ -106,12 +109,42 @@ export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: stri
     dur_ms: Date.now() - startedAt,
     cost_usd: costUsd,
     turns: numTurns,
+    ...usage,
   });
 
   return { replyText, ok };
 }
 
+interface ModelUsageLike {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  contextWindow: number;
+}
+
+/** Sums token usage across every model used this turn (normally just one) — surfaces context growth in Loki without needing to trust auto-compaction blindly. */
+function summarizeUsage(
+  modelUsage: Record<string, ModelUsageLike> | undefined,
+): { inputTokens: number; outputTokens: number; cacheReadTokens: number; contextWindow: number } | null {
+  const entries = Object.values(modelUsage ?? {});
+  if (entries.length === 0) return null;
+  return entries.reduce(
+    (acc, m) => ({
+      inputTokens: acc.inputTokens + m.inputTokens,
+      outputTokens: acc.outputTokens + m.outputTokens,
+      cacheReadTokens: acc.cacheReadTokens + m.cacheReadInputTokens,
+      contextWindow: Math.max(acc.contextWindow, m.contextWindow),
+    }),
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, contextWindow: 0 },
+  );
+}
+
 function logSdkMessage(person: string, turnId: string, message: SDKMessage): void {
+  if (message.type === 'system' && message.subtype === 'compact_boundary') {
+    const { trigger, pre_tokens, post_tokens } = message.compact_metadata;
+    log.line('compact_boundary', { person, turn: turnId, trigger, preTokens: pre_tokens, postTokens: post_tokens });
+    return;
+  }
   if (message.type === 'assistant') {
     const content = (message.message.content as LooseContentBlock[]) ?? [];
     for (const block of content) {

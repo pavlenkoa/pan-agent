@@ -4,18 +4,21 @@
  * returns 409 and the operator holds + retries.
  */
 import { execFile } from 'node:child_process';
+import { copyFile, mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { readJsonBody, sendJson } from '../shared/http.js';
 import { log } from '../shared/log.js';
 import type { TurnRequest } from '../shared/types.js';
-import { loadRunnerConfig } from './config.js';
+import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { runTurn } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
+const PERSONA_MOUNT_DIR = '/config';
 
 /** Best-effort — same bot identity the old single-tenant image configured at startup. */
 async function ensureGitIdentity(): Promise<void> {
@@ -28,10 +31,32 @@ async function ensureGitIdentity(): Promise<void> {
   }
 }
 
+/**
+ * The pan-agent-persona ConfigMap is mounted read-only at /config — that's
+ * not a path the Claude Agent SDK's CLAUDE.md/skill auto-discovery ever
+ * looks at (~/.claude/CLAUDE.md for identity/user-level memory,
+ * <cwd>/.claude/skills/<name>/SKILL.md for project skills — matches what
+ * CLAUDE.md itself already tells the model: "read .claude/skills/media/
+ * SKILL.md in the workspace"). Copy it into place on every boot so a
+ * ConfigMap update takes effect on the next pod restart.
+ */
+async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
+  try {
+    await copyFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), path.join(cfg.claudeHome, 'CLAUDE.md'));
+    const mediaSkillDir = path.join(cfg.workspaceCwd, '.claude', 'skills', 'media');
+    await mkdir(mediaSkillDir, { recursive: true });
+    await copyFile(path.join(PERSONA_MOUNT_DIR, 'SKILL.md'), path.join(mediaSkillDir, 'SKILL.md'));
+    log.line('persona_installed', { person: cfg.slug });
+  } catch (err) {
+    log.error('persona_install_failed', err, { person: cfg.slug });
+  }
+}
+
 async function main(): Promise<void> {
   const cfg = loadRunnerConfig();
   const journal = createJournal(cfg.journalDir);
   await ensureGitIdentity();
+  await installPersonaFiles(cfg);
 
   let busy = false;
 

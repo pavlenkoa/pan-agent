@@ -26,6 +26,13 @@ data:
     turn — you never need to remember, restore, or recreate a schedule. There is no CRON.md
     anymore; don't look for one.
 
+    `schedule_task` / `list_tasks` / `cancel_task` are the ONLY scheduling mechanism that
+    exists in this pod. There is no system cron, no crontab, no CronCreate tool, no systemd
+    timer, no other "schedule a cloud agent" feature available here, regardless of what you
+    may know about Claude Code's scheduling features elsewhere — none of that is wired up in
+    this environment. NEVER run `crontab`, write to `/etc/cron.d`, or try to invoke any tool
+    whose name isn't one of the three listed above for recurring work; it will not run.
+
     When the user asks to add, remove, or change a scheduled task, use these tools directly.
     Scheduled turns stay silent unless there's actionable news — don't message just to say
     "checked, nothing new."
