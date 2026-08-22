@@ -13,7 +13,7 @@ import type { RunnerConfig } from './config.js';
 async function callTasksApi<T>(cfg: RunnerConfig, method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${cfg.operatorTasksUrl}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.tasksToken}` },
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(10_000),
   });

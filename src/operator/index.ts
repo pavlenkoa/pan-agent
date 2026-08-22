@@ -29,8 +29,8 @@ async function main(): Promise<void> {
 
   const deliver = async (slug: string, chatId: number, turn: TaskTurn): Promise<void> => {
     const idx = await readPeopleIndex(api, cfg.namespace);
-    const tz = idx.people[slug]?.tz ?? cfg.defaultTz;
-    await deliverTaskTurn(api, cfg, slug, chatId, tz, turn);
+    const person = idx.people[slug];
+    await deliverTaskTurn(api, cfg, slug, chatId, person?.tz ?? cfg.defaultTz, person?.tasksToken ?? '', turn);
   };
 
   startSweepTimer(api, cfg.namespace, cfg.sweepIntervalMs, cfg.catchUpWindowMs, deliver);

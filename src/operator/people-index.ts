@@ -3,6 +3,8 @@
  * ConfigMap, small, bounded. Seeded lazily by the operator on first read;
  * never written to git (section 8: "seed it only if absent via operator").
  */
+import { randomBytes } from 'node:crypto';
+
 import type { CoreV1Api } from '@kubernetes/client-node';
 
 import { emptyPeopleIndex, type PeopleIndex, type PersonIndexEntry } from '../shared/types.js';
@@ -69,6 +71,9 @@ export async function approvePerson(
   let entry!: PersonIndexEntry;
   const idx = await mutatePeopleIndex(api, namespace, (idx) => {
     const now = new Date().toISOString();
+    // Reuse the existing token on re-approval (e.g. /restart doesn't call this, but a
+    // second /approve for the same slug shouldn't invalidate an already-running pod's token).
+    const tasksToken = idx.people[slug]?.tasksToken ?? randomBytes(32).toString('hex');
     entry = {
       telegramUserId,
       chatId: telegramUserId,
@@ -76,6 +81,7 @@ export async function approvePerson(
       tz,
       createdAt: now,
       lastSeenAt: now,
+      tasksToken,
     };
     idx.people[slug] = entry;
     delete idx.pending[String(telegramUserId)];

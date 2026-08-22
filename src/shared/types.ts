@@ -51,6 +51,8 @@ export interface PersonIndexEntry {
   tz: string;
   createdAt: string;
   lastSeenAt: string;
+  /** Bearer token this person's pod presents to the operator's /tasks API (authorizes only its own slug). */
+  tasksToken: string;
 }
 
 export interface PendingPerson {

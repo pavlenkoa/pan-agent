@@ -10,6 +10,7 @@ export interface RunnerConfig {
   tz: string;
   port: number;
   operatorTasksUrl: string;
+  tasksToken: string;
   telegramBotToken: string;
   journalDir: string;
   workspaceCwd: string;
@@ -25,6 +26,7 @@ export function loadRunnerConfig(): RunnerConfig {
     tz: process.env['TZ'] ?? 'Europe/Warsaw',
     port: Number(process.env['PORT'] ?? 8080),
     operatorTasksUrl: requireEnv('OPERATOR_TASKS_URL'),
+    tasksToken: requireEnv('PERSON_TASKS_TOKEN'),
     telegramBotToken: requireEnv('TELEGRAM_BOT_TOKEN'),
     journalDir: process.env['JOURNAL_DIR'] ?? `${claudeHome}/pan-agent-journal`,
     workspaceCwd: process.env['WORKSPACE_CWD'] ?? '/home/claude/workspace',

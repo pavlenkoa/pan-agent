@@ -49,8 +49,17 @@ See `src/operator/config.ts` for every override (`NAMESPACE`, `NFS_SERVER`,
 `TASKS_API_PORT`, `POD_READY_TIMEOUT_MS`).
 
 Runner (required env, all set by the operator's pod template): `PERSON_SLUG`,
-`PERSON_CHAT_ID`, `OPERATOR_TASKS_URL`, `TELEGRAM_BOT_TOKEN`,
-`CLAUDE_CODE_OAUTH_TOKEN`. See `src/runner/config.ts` for overrides.
+`PERSON_CHAT_ID`, `PERSON_TASKS_TOKEN`, `OPERATOR_TASKS_URL`,
+`TELEGRAM_BOT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`. See `src/runner/config.ts`
+for overrides.
+
+`PERSON_TASKS_TOKEN` is a random token minted per person at approval time
+(stored in `pan-agent-people`, injected into that person's pod only) and sent
+as `Authorization: Bearer` on every `/tasks` call — the operator rejects any
+request whose token doesn't match the claimed slug. Without it, one person's
+pod could schedule/read/cancel tasks for any other person, since they all
+share the one `/tasks` API and network policy allows any person-pod to reach
+it.
 
 ## First deploy (summary — see the architecture doc's migration path for the full sequence)
 

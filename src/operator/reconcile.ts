@@ -37,7 +37,7 @@ export async function bootReconcile(api: CoreV1Api, cfg: OperatorConfig): Promis
     if (person.status !== 'active') continue;
     if (podSlugs.has(slug)) continue;
     log.line('reconcile_creating_pod', { person: slug });
-    await ensurePersonPod(api, cfg, slug, person.chatId, person.tz);
+    await ensurePersonPod(api, cfg, slug, person.chatId, person.tz, person.tasksToken);
   }
 
   for (const [slug, podName] of podSlugs) {

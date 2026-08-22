@@ -17,11 +17,12 @@ export async function ensurePersonPod(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
 ): Promise<void> {
   const existing = await getPod(api, cfg.namespace, podName(slug));
   if (existing) return;
   await ensurePersonHomeDirs(slug);
-  const spec = buildPersonPodSpec(cfg, slug, chatId, tz);
+  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken);
   await createPod(api, cfg.namespace, spec);
   log.line('pod_created', { person: slug });
 }
@@ -57,10 +58,11 @@ export async function recreatePod(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
 ): Promise<void> {
   await deletePod(api, cfg.namespace, podName(slug));
   await waitForPodGone(api, cfg.namespace, slug);
-  await ensurePersonPod(api, cfg, slug, chatId, tz);
+  await ensurePersonPod(api, cfg, slug, chatId, tz, tasksToken);
   log.line('pod_recreated', { person: slug });
 }
 

@@ -31,10 +31,11 @@ async function deliverOnce(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
   turn: TurnRequest,
 ): Promise<DeliverOutcome> {
   if (!(await podExists(api, cfg.namespace, slug))) {
-    await ensurePersonPod(api, cfg, slug, chatId, tz);
+    await ensurePersonPod(api, cfg, slug, chatId, tz, tasksToken);
   }
   const ready = await waitForPodReady(api, cfg.namespace, slug, cfg.podReadyTimeoutMs);
   if (!ready) return 'retry';
@@ -73,13 +74,14 @@ export async function sendTurnWithRetry(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
   turn: TurnRequest,
   maxWaitMs = 10 * 60_000,
 ): Promise<boolean> {
   const deadline = Date.now() + maxWaitMs;
   let attempt = 0;
   while (Date.now() < deadline) {
-    if ((await deliverOnce(api, cfg, slug, chatId, tz, turn)) === 'accepted') return true;
+    if ((await deliverOnce(api, cfg, slug, chatId, tz, tasksToken, turn)) === 'accepted') return true;
     await sleep(backoffMs(attempt++));
   }
   log.line('turn_delivery_gave_up', { person: slug, kind: turn.kind });
@@ -106,6 +108,7 @@ export function enqueueChatMessage(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
   updateId: number,
   message: ChatMessage,
 ): Promise<void> {
@@ -113,10 +116,17 @@ export function enqueueChatMessage(
   queues.set(slug, q);
   q.queued.push({ updateId, message });
   if (q.busy) return Promise.resolve();
-  return flush(api, cfg, slug, chatId, tz);
+  return flush(api, cfg, slug, chatId, tz, tasksToken);
 }
 
-async function flush(api: CoreV1Api, cfg: OperatorConfig, slug: string, chatId: number, tz: string): Promise<void> {
+async function flush(
+  api: CoreV1Api,
+  cfg: OperatorConfig,
+  slug: string,
+  chatId: number,
+  tz: string,
+  tasksToken: string,
+): Promise<void> {
   const q = queues.get(slug);
   if (!q || q.busy || q.queued.length === 0) return;
   q.busy = true;
@@ -129,7 +139,7 @@ async function flush(api: CoreV1Api, cfg: OperatorConfig, slug: string, chatId: 
       const updateId = Math.max(...batch.map((b) => b.updateId));
       const turn: ChatTurn = { kind: 'chat', updateId, chatId, messages: batch.map((b) => b.message) };
 
-      const outcome = await deliverOnce(api, cfg, slug, chatId, tz, turn);
+      const outcome = await deliverOnce(api, cfg, slug, chatId, tz, tasksToken, turn);
       if (outcome === 'accepted') {
         await markUpdateDelivered(api, cfg.namespace, slug, updateId);
         continue; // loop re-checks q.queued in case more arrived meanwhile
@@ -142,7 +152,7 @@ async function flush(api: CoreV1Api, cfg: OperatorConfig, slug: string, chatId: 
     if (q.queued.length > 0) log.line('chat_delivery_gave_up', { person: slug });
   } finally {
     q.busy = false;
-    if (q.queued.length > 0) void flush(api, cfg, slug, chatId, tz);
+    if (q.queued.length > 0) void flush(api, cfg, slug, chatId, tz, tasksToken);
   }
 }
 
@@ -152,8 +162,9 @@ export async function deliverTaskTurn(
   slug: string,
   chatId: number,
   tz: string,
+  tasksToken: string,
   turn: TaskTurn,
 ): Promise<void> {
-  const ok = await sendTurnWithRetry(api, cfg, slug, chatId, tz, turn, 2 * 60_000);
+  const ok = await sendTurnWithRetry(api, cfg, slug, chatId, tz, tasksToken, turn, 2 * 60_000);
   if (!ok) throw new Error(`failed to deliver task turn ${turn.taskId} to ${slug}`);
 }

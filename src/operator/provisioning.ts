@@ -17,7 +17,7 @@ export async function provisionPerson(
 ): Promise<{ entry: PersonIndexEntry; ready: boolean }> {
   const { entry } = await approvePerson(deps.api, deps.cfg.namespace, slug, telegramUserId, deps.cfg.defaultTz);
   await ensurePersonState(deps.api, deps.cfg.namespace, slug, displayName);
-  await ensurePersonPod(deps.api, deps.cfg, slug, entry.chatId, entry.tz);
+  await ensurePersonPod(deps.api, deps.cfg, slug, entry.chatId, entry.tz, entry.tasksToken);
   const ready = await waitForPodReady(deps.api, deps.cfg.namespace, slug, deps.cfg.podReadyTimeoutMs);
   return { entry, ready };
 }

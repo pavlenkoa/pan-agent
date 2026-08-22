@@ -37,7 +37,7 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   if (!person || person.status !== 'active') return;
 
   await touchLastSeen(deps.api, deps.cfg.namespace, slug);
-  await enqueueChatMessage(deps.api, deps.cfg, slug, person.chatId, person.tz, update.update_id, {
+  await enqueueChatMessage(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken, update.update_id, {
     messageId: msg.message_id,
     text: msg.text ?? '',
     fromHandle: msg.from.username ? `@${msg.from.username}` : null,
@@ -91,7 +91,7 @@ async function autoApprove(
       ? `Auto-approved ${handle} (${telegramUserId}) as ${slug}.`
       : `Auto-approved ${handle} (${telegramUserId}) as ${slug}, but pod not ready yet — check kubectl.`,
   );
-  await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, update.update_id, {
+  await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, entry.tasksToken, update.update_id, {
     messageId: msg.message_id,
     text: msg.text ?? '',
     fromHandle: msg.from?.username ? `@${msg.from.username}` : null,

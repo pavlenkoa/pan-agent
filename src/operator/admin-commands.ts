@@ -64,7 +64,7 @@ async function handleApprove(deps: RouterDeps, args: string[], update: TelegramU
   );
 
   if (pending?.firstMessage) {
-    await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, update.update_id, {
+    await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, entry.tasksToken, update.update_id, {
       messageId: 0,
       text: pending.firstMessage,
       fromHandle: pending.handle,
@@ -115,6 +115,6 @@ async function handleRestart(deps: RouterDeps, args: string[]): Promise<void> {
     await deps.telegram.sendMessage(admin, `Unknown person ${slug}.`);
     return;
   }
-  await recreatePod(deps.api, deps.cfg, slug, person.chatId, person.tz);
+  await recreatePod(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken);
   await deps.telegram.sendMessage(admin, `Restarted ${slug}.`);
 }

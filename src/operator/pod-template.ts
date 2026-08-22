@@ -17,7 +17,13 @@ function secretEnv(name: string, secretName: string, key: string) {
   return { name, valueFrom: { secretKeyRef: { name: secretName, key } } };
 }
 
-export function buildPersonPodSpec(cfg: OperatorConfig, slug: string, chatId: number, tz: string): V1Pod {
+export function buildPersonPodSpec(
+  cfg: OperatorConfig,
+  slug: string,
+  chatId: number,
+  tz: string,
+  tasksToken: string,
+): V1Pod {
   const name = podName(slug);
   const peopleHome = `${cfg.nfsRootPath}/people/${slug}`;
   return {
@@ -45,6 +51,7 @@ export function buildPersonPodSpec(cfg: OperatorConfig, slug: string, chatId: nu
           env: [
             { name: 'PERSON_SLUG', value: slug },
             { name: 'PERSON_CHAT_ID', value: String(chatId) },
+            { name: 'PERSON_TASKS_TOKEN', value: tasksToken },
             { name: 'TZ', value: tz },
             { name: 'LANG', value: 'C.UTF-8' },
             { name: 'OPERATOR_TASKS_URL', value: `http://${cfg.operatorServiceHost}:${cfg.tasksApiPort}` },

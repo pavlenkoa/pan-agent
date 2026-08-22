@@ -54,6 +54,7 @@ describe('enqueueChatMessage — batching while the pod is busy', () => {
       slug,
       111,
       'Europe/Warsaw',
+      'test-token',
       101,
       msg('first'),
     );
@@ -67,6 +68,7 @@ describe('enqueueChatMessage — batching while the pod is busy', () => {
       slug,
       111,
       'Europe/Warsaw',
+      'test-token',
       102,
       msg('second'),
     );
