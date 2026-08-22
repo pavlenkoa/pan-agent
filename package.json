@@ -1,0 +1,28 @@
+{
+  "name": "pan-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-person Claude Code agent host: one operator process, one long-lived pod per person.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "operator": "node dist/operator/index.js",
+    "runner": "node dist/runner/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@kubernetes/client-node": "^1.4.0",
+    "cron-parser": "^5.6.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
