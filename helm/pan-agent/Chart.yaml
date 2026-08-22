@@ -1,0 +1,12 @@
+apiVersion: v2
+name: pan-agent
+description: Пан Агент — per-person Claude Agent SDK pods driven by a Telegram bot
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/pavlenkoa/pan-agent
+sources:
+  - https://github.com/pavlenkoa/pan-agent
+maintainers:
+  - name: Andrii Pavlenko
+    url: https://github.com/pavlenkoa

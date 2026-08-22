@@ -1,0 +1,153 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: pan-agent-person-pod
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: person-pod
+
+  ingress:
+    # Only the operator may push turns in.
+    - fromEndpoints:
+        - matchLabels:
+            app: pan-agent-operator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+  egress:
+    # 1. DNS
+    - toEndpoints:
+        - matchLabels:
+            io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # 2. The operator's tasks API (schedule_task / list_tasks / cancel_task)
+    - toEndpoints:
+        - matchLabels:
+            app: pan-agent-operator
+      toPorts:
+        - ports:
+            - port: {{ .Values.operator.tasksApiPort | quote }}
+              protocol: TCP
+
+    # 3. Transmission RPC
+    - toEndpoints:
+        - matchLabels:
+            io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name: {{ .Values.network.transmissionNamespace }}
+            app: transmission
+      toPorts:
+        - ports:
+            - port: "9091"
+              protocol: TCP
+
+    {{- if .Values.network.embyCidrs }}
+    # 4. Emby
+    - toCIDRSet:
+        {{- range .Values.network.embyCidrs }}
+        - cidr: {{ . }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "8096"
+              protocol: TCP
+    {{- end }}
+
+    # 5. NFS (PV mounts)
+    - toCIDR:
+        - {{ .Values.nfs.server }}/32
+      toPorts:
+        - ports:
+            - port: "2049"
+              protocol: TCP
+            - port: "111"
+              protocol: TCP
+
+    # 6. Internet — api.anthropic.com, api.telegram.org, trackers, TMDB, GitHub.
+    # Notably NO k8s API egress (unlike today's claude-code pod): the runner
+    # never talks to the k8s API server — only the operator does.
+    - toCIDRSet:
+        - cidr: 0.0.0.0/0
+          {{- if .Values.network.excludeCidrs }}
+          except:
+            {{- toYaml .Values.network.excludeCidrs | nindent 12 }}
+          {{- end }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: pan-agent-operator
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app: pan-agent-operator
+
+  ingress:
+    # Person pods call back into the tasks API.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: person-pod
+      toPorts:
+        - ports:
+            - port: {{ .Values.operator.tasksApiPort | quote }}
+              protocol: TCP
+
+  egress:
+    # 1. DNS
+    - toEndpoints:
+        - matchLabels:
+            io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    {{- if .Values.network.kubeApiCidr }}
+    # 2. Kubernetes API server (pod/configmap CRUD)
+    - toCIDR:
+        - {{ .Values.network.kubeApiCidr }}
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    {{- end }}
+
+    # 3. Every person pod's runner (POST /turn)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: person-pod
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+    # 4. NFS to Raspberry Pi (person-home mkdir provisioning)
+    - toCIDR:
+        - {{ .Values.nfs.server }}/32
+      toPorts:
+        - ports:
+            - port: "2049"
+              protocol: TCP
+            - port: "111"
+              protocol: TCP
+
+    # 5. Internet — api.telegram.org (getUpdates + holding/admin replies)
+    - toCIDRSet:
+        - cidr: 0.0.0.0/0
+          {{- if .Values.network.excludeCidrs }}
+          except:
+            {{- toYaml .Values.network.excludeCidrs | nindent 12 }}
+          {{- end }}

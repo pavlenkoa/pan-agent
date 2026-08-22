@@ -1,0 +1,46 @@
+# Default values for pan-agent.
+# Environment-specific overrides (node, NFS server, CIDRs, ...) belong in the
+# deploying cluster's GitOps repo, not here — see homelab's
+# kubernetes/apps/pan-agent/values/homelab.yaml for the reference deployment.
+
+image:
+  repository: ghcr.io/pavlenkoa/pan-agent
+  tag: latest
+  pullPolicy: Always
+
+# Both the operator and person pods (spawned by the operator with the same
+# image) run on this single node — required today, since NFS home
+# provisioning and PERSON_POD_NODE assume co-location. Empty = no pinning.
+nodeName: ""
+
+operator:
+  tasksApiPort: 8081
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+defaultTz: UTC
+
+nfs:
+  server: ""
+  # Per-person home directories, mkdir'd by the operator itself.
+  rootPath: /media/pan-agent
+  mountPath: /mnt/pan-agent-nfs
+
+# Media library PV, mounted read-write into every person pod.
+media:
+  nfsPath: /media
+  capacity: 1Ti
+
+network:
+  transmissionNamespace: transmission
+  # Emby reachability (e.g. the OrbStack host.internal range). Empty disables that egress rule.
+  embyCidrs: []
+  # Kubernetes API server, needed by the operator only. Empty disables that egress rule.
+  kubeApiCidr: ""
+  # Private ranges excluded from the pods' "allow all internet" egress rule.
+  excludeCidrs: []
