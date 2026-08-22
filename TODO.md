@@ -108,9 +108,10 @@ pushed** — see "Before first deploy" below.
       (`src/operator/provisioning.ts`, wired into `router.ts`'s
       `handleUnknownSender` and reused by `/approve`) — no manual per-person
       approval needed for these three.
-- [ ] On the Pi: `mkdir -p /media/pan-agent/{people,tracking}`; migrate
-      `~/.claude`/workspace from `/media/claude-code` and tracking data from
-      `/media/openclaw` if carrying over history.
+- [x] On the Pi: `mkdir -p /media/pan-agent/{people,tracking}`.
+- [ ] Decide whether to migrate `~/.claude`/workspace history from
+      `/media/claude-code` and tracking data from `/media/openclaw`, or start
+      pan-agent fresh (claude-code keeps running independently either way).
 
 ### Deploy + validate
 - [ ] Let ArgoCD sync `pan-agent`; confirm namespace/RBAC/CNPs/ExternalSecrets
