@@ -109,7 +109,18 @@ async function main(): Promise<void> {
   }
 
   async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (busy) {
+    // `busy` alone only ever covered concurrent /turn HTTP requests — it has
+    // no visibility into a job session-controller started on its own
+    // (auto-compact, a task-notification reaction), so a real turn could
+    // slip through and silently overwrite one of those. Confirmed live
+    // 2026-08-23: exactly this happened, orphaning an in-flight
+    // auto-compact's promise forever and misattributing its SDK messages to
+    // the turn that stomped it. `controller.isBusy()` is the actual source
+    // of truth for "is session-controller doing anything right now" —
+    // checking both closes the gap without losing `busy`'s own purpose
+    // (rejecting a second /turn that arrives before the first has even
+    // finished parsing/journaling, before isBusy() would reflect it).
+    if (busy || controller.isBusy()) {
       sendJson(res, 409, { error: 'busy' });
       return;
     }

@@ -103,7 +103,25 @@ export function createSessionController(
     return currentJob !== null;
   }
 
+  /**
+   * Confirmed live 2026-08-23: a real incoming HTTP turn silently overwrote
+   * an in-flight `auto_compact` job's `currentJob` — `index.ts`'s own `busy`
+   * flag has no visibility into internally-triggered jobs (auto-compact,
+   * task-notification reactions), so it let a second turn through while one
+   * was still running. That orphaned the first job's promise forever (never
+   * resolved/rejected — the caller just hangs) and interleaved both jobs'
+   * SDK messages under the wrong `currentJob`, misattributing one job's
+   * `compact_boundary`/tool calls/reply to the other. Every caller is
+   * already supposed to check busy-ness first (`index.ts` now also checks
+   * `isBusy()`, not just its own flag; `reactToTaskNotification` and
+   * `maybeTriggerAutoCompact` already guard on `currentJob`) — this throw is
+   * defense in depth, turning any future gap in that gating into a loud,
+   * visible error instead of silent single-flight corruption.
+   */
   function startJob(trigger: Job['trigger'], turnId: string, message: SDKUserMessage): Promise<TurnResult> {
+    if (currentJob) {
+      return Promise.reject(new Error(`startJob(${turnId}) called while turn ${currentJob.turnId} is still in flight`));
+    }
     return new Promise((resolve, reject) => {
       currentJob = { turnId, trigger, startedAt: Date.now(), resolve, reject, replyText: '', ok: true, numTurns: 0, costUsd: 0, usage: null };
       log.line('turn_start', { person: cfg.slug, session: sessionId, turn: turnId, trigger });
@@ -215,29 +233,47 @@ export function createSessionController(
    * App-enforced ceiling, checked after every job — the SDK's own
    * `autoCompactThreshold` scales up near the model's full window (see
    * `DEFAULT_CONTEXT_LIMIT`'s comment), so it never actually protects
-   * against a 250K-scale budget. `cacheReadTokens + inputTokens +
-   * outputTokens` approximates current total context without an extra
-   * `getContextUsage()` round-trip per turn (cacheReadTokens = prior
-   * conversation reused this turn, the other two = what this turn just
-   * added). Skips when `job.trigger === 'auto_compact'` so a compact's own
-   * near-empty result (confirmed live: empty `modelUsage`) can never chain
-   * into another one, and skips when something's already queued so it
-   * never preempts real work.
+   * against a 250K-scale budget. Uses a live `getContextUsage()` call for
+   * the real current total — confirmed live 2026-08-23 that a turn's own
+   * reported `cacheReadTokens` is NOT current context size, it's cumulative
+   * across every internal tool-call round-trip *within* that turn (each
+   * round-trip re-reads the growing prefix from cache, so a turn with
+   * several tool calls keeps adding to it even though real context barely
+   * grows): a turn that reported 305,144 that way had a real context of
+   * just 32,629 once actually measured, and the gap between those two
+   * numbers is exactly what triggered a cascade of unnecessary compactions
+   * (and, compounding with a separate single-flight gap since fixed, real
+   * incoming turns colliding with them). Skips when `job.trigger ===
+   * 'auto_compact'` so a compact's own result can never chain into another
+   * one, and checks `currentJob`/`reactionQueue` both before *and* after the
+   * `getContextUsage()` await — something can start in the gap while it's
+   * in flight.
    */
   function maybeTriggerAutoCompact(job: Job): void {
     if (job.trigger === 'auto_compact' || currentJob || reactionQueue.length > 0) return;
-    const totalSoFar = (job.usage?.cacheReadTokens ?? 0) + (job.usage?.inputTokens ?? 0) + (job.usage?.outputTokens ?? 0);
-    if (totalSoFar <= contextLimit) return;
-    void runAutoCompact(totalSoFar);
+    void checkContextAndMaybeAutoCompact();
   }
 
-  async function runAutoCompact(totalSoFar: number): Promise<void> {
+  async function checkContextAndMaybeAutoCompact(): Promise<void> {
+    if (!queryHandle || currentJob || reactionQueue.length > 0) return;
+    let totalTokens: number;
+    try {
+      totalTokens = (await queryHandle.getContextUsage()).totalTokens;
+    } catch (err) {
+      log.error('context_usage_check_failed', err, { person: cfg.slug });
+      return;
+    }
+    if (totalTokens <= contextLimit || currentJob || reactionQueue.length > 0) return;
+    void runAutoCompact(totalTokens);
+  }
+
+  async function runAutoCompact(totalTokens: number): Promise<void> {
     const turnId = `auto-compact:${Date.now()}`;
     const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: '/compact' }, parent_tool_use_id: null };
     const timer = setTimeout(() => timeoutControlTurn(turnId), controlTurnTimeoutMs);
     try {
       const result = await startJob('auto_compact', turnId, message);
-      log.line('auto_compact_triggered', { person: cfg.slug, totalSoFar, contextLimit, ok: result.ok });
+      log.line('auto_compact_triggered', { person: cfg.slug, totalTokens, contextLimit, ok: result.ok });
       await sendTelegramReply(
         cfg.telegramBotToken,
         cfg.chatId,

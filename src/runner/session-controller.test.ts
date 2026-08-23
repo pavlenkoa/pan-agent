@@ -29,29 +29,6 @@ function resultMessage(text: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
-function resultMessageWithUsage(
-  text: string,
-  usage: { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number },
-): SDKMessage {
-  return {
-    type: 'result',
-    subtype: 'success',
-    is_error: false,
-    num_turns: 1,
-    total_cost_usd: 0,
-    result: text,
-    modelUsage: {
-      'claude-sonnet-5': {
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
-        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
-        contextWindow: 1_000_000,
-      },
-    },
-    session_id: 'sess-1',
-  } as unknown as SDKMessage;
-}
-
 function taskNotification(taskId: string, summary: string): SDKMessage {
   return {
     type: 'system',
@@ -65,12 +42,30 @@ function taskNotification(taskId: string, summary: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
-/** A fake query() whose events are entirely test-driven via `fakeEvents`. */
-function fakeQueryFn(fakeEvents: ReturnType<typeof createPushableQueue<SDKMessage>>) {
+/**
+ * A fake query() whose events are entirely test-driven via `fakeEvents`.
+ * `getContextUsage` is a mutable getter, not a fixed value — tests that
+ * exercise auto-compact need to change what it reports mid-test (e.g. "over
+ * the limit" for one check, "back under" after compacting), and it defaults
+ * to a low, never-triggers value so unrelated tests don't have to think
+ * about it at all.
+ */
+function fakeQueryFn(
+  fakeEvents: ReturnType<typeof createPushableQueue<SDKMessage>>,
+  getTotalTokens: () => number = () => 0,
+) {
   return vi.fn(() => {
-    return (async function* gen() {
+    const gen = (async function* gen() {
       for await (const msg of fakeEvents) yield msg;
-    })() as unknown as Query;
+    })();
+    return Object.assign(gen, {
+      getContextUsage: async () => ({
+        model: 'claude-sonnet-5',
+        totalTokens: getTotalTokens(),
+        maxTokens: 1_000_000,
+        isAutoCompactEnabled: true,
+      }),
+    }) as unknown as Query;
   });
 }
 
@@ -116,9 +111,12 @@ describe('createSessionController', () => {
   });
 
   /** fakeQueryFn + tracking it for afterEach's cleanup, in one call. */
-  function trackedFakeQueryFn(fakeEvents: ReturnType<typeof createPushableQueue<SDKMessage>>) {
+  function trackedFakeQueryFn(
+    fakeEvents: ReturnType<typeof createPushableQueue<SDKMessage>>,
+    getTotalTokens?: () => number,
+  ) {
     fakeEventsInUse = fakeEvents;
-    return fakeQueryFn(fakeEvents);
+    return fakeQueryFn(fakeEvents, getTotalTokens);
   }
 
   const chatTurn: ChatTurn = {
@@ -216,26 +214,31 @@ describe('createSessionController', () => {
     expect(controller.isBusy()).toBe(false);
   });
 
-  it('auto-compacts once usage crosses the configured context limit, and does not chain into a second one', async () => {
+  it('auto-compacts once a live getContextUsage() check crosses the configured limit, and does not chain into a second one', async () => {
+    // Confirmed live 2026-08-23: a turn's own reported cacheReadTokens is NOT
+    // current context size (cumulative across internal tool-call round-trips
+    // within one turn, not a snapshot) — the mechanism has to ask
+    // getContextUsage() for the real number, so that's what this fakes.
+    let totalTokens = 150;
     const fakeEvents = createPushableQueue<SDKMessage>();
-    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents, () => totalTokens));
     await controller.start();
     await flushMicrotasks();
     controller.setContextLimit(100);
 
     const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
-    fakeEvents.push(resultMessageWithUsage('hi back', { cacheReadInputTokens: 150 }));
+    fakeEvents.push(resultMessage('hi back'));
     await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
 
     // No external submitTurn call here — this job has to start on its own.
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
 
-    // Resolve it with a real /compact-shaped result (empty text) but
-    // deliberately high usage, to prove the trigger:'auto_compact' guard
-    // stops it from chaining into a second auto-compact rather than the
-    // numbers just happening to fall under the limit this time.
-    fakeEvents.push(resultMessageWithUsage('', { cacheReadInputTokens: 999 }));
+    // Resolve it with a real /compact-shaped result (empty text). Leave
+    // totalTokens deliberately still over the limit, to prove the
+    // trigger:'auto_compact' guard stops it from chaining into a second
+    // auto-compact rather than the number just happening to drop this time.
+    fakeEvents.push(resultMessage(''));
     await vi.waitFor(() =>
       expect(sendTelegramReply).toHaveBeenCalledWith(
         cfg.telegramBotToken,
@@ -249,21 +252,57 @@ describe('createSessionController', () => {
     expect(sendTelegramReply).toHaveBeenCalledTimes(1); // exactly one auto-compact, not two
   });
 
-  it('does not auto-compact when usage stays under the configured limit', async () => {
+  it('does not auto-compact when the live getContextUsage() check stays under the configured limit', async () => {
     const fakeEvents = createPushableQueue<SDKMessage>();
-    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents, () => 150));
     await controller.start();
     await flushMicrotasks();
     controller.setContextLimit(1_000_000); // default-shaped: far above what this turn uses
 
     const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
-    fakeEvents.push(resultMessageWithUsage('hi back', { cacheReadInputTokens: 150 }));
+    fakeEvents.push(resultMessage('hi back'));
     await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
 
     await flushMicrotasks();
     expect(controller.isBusy()).toBe(false);
     expect(sendTelegramReply).not.toHaveBeenCalled();
+  });
+
+  it('a real turn arriving while an internal job (e.g. auto-compact) is in flight gets rejected, not silently merged', async () => {
+    // Confirmed live 2026-08-23: this is the actual production bug — a real
+    // Telegram message arrived while an auto-compact was running, and
+    // startJob() silently overwrote currentJob instead of refusing, orphaning
+    // the auto-compact's promise forever. This guards the fix at the
+    // session-controller level (index.ts's own isBusy() check is the other
+    // half, not exercised by this unit test).
+    let totalTokens = 150;
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents, () => totalTokens));
+    await controller.start();
+    await flushMicrotasks();
+    controller.setContextLimit(100);
+
+    const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('hi back'));
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+
+    // Auto-compact starts on its own — while it's in flight, simulate a real
+    // turn arriving (what index.ts would normally block via isBusy(), but
+    // this exercises startJob()'s own defense-in-depth guard directly).
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    await expect(controller.submitTurn(chatTurn, 'turn-2')).rejects.toThrow(/still in flight/);
+
+    // The auto-compact itself is unaffected by the rejected intruder.
+    fakeEvents.push(resultMessage(''));
+    await vi.waitFor(() =>
+      expect(sendTelegramReply).toHaveBeenCalledWith(
+        cfg.telegramBotToken,
+        cfg.chatId,
+        '✅ Auto-compacted: context passed your 100-token limit.',
+      ),
+    );
   });
 
   it('a control turn that never resolves times out and unblocks the queue for later turns', async () => {
