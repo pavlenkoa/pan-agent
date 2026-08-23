@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests",
+    "security:openssf-scorecard"
+  ],
+
+  // Schedule & Limits
+  "schedule": ["before 6am on monday"],
+  "timezone": "Europe/Kyiv",
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 5,
+
+  // Stability - wait 3 days before updating to fresh releases
+  "minimumReleaseAge": "3 days",
+
+  // Automerge (Renovate-managed, not GitHub's native automerge)
+  "automerge": true,
+  "platformAutomerge": false,
+
+  // Labels
+  "labels": ["dependencies"],
+
+  // Security
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "minimumReleaseAge": null
+  },
+
+  // Package Rules
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Group npm dependencies",
+      "matchManagers": ["npm"],
+      "groupName": "npm dependencies"
+    },
+    {
+      "description": "Group Docker images",
+      "matchManagers": ["dockerfile"],
+      "groupName": "Docker images"
+    },
+    {
+      "description": "Don't automerge major updates",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "Disable helm-values manager - digest pinning incompatible with template concatenation",
+      "matchManagers": ["helm-values"],
+      "enabled": false
+    },
+    {
+      "description": "Skip stability wait for digest updates - digests are immutable",
+      "matchUpdateTypes": ["digest", "pinDigest", "pin"],
+      "minimumReleaseAge": null
+    }
+  ]
+}
