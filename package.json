@@ -15,14 +15,14 @@
     "runner": "node dist/runner/index.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
-    "@kubernetes/client-node": "^1.4.0",
-    "cron-parser": "^5.6.2",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.241",
+    "@kubernetes/client-node": "^2.0.0",
+    "cron-parser": "^5.10.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }
