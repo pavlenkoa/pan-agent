@@ -54,7 +54,7 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   const person = idx.people[slug];
   if (!person || person.status !== 'active') return;
 
-  const handled = await tryHandlePersonCommand(deps, slug, person, msg.text ?? '');
+  const handled = await tryHandlePersonCommand(deps, slug, person, msg.text ?? '', update.update_id);
   if (handled) return;
 
   await touchLastSeen(deps.api, deps.cfg.namespace, slug);

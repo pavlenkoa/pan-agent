@@ -4,7 +4,7 @@
  * mount not-yet-existing subpaths, so this sidesteps needing an
  * openclaw-style root initContainer/chown dance.
  */
-import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const NFS_MOUNT_PATH = process.env['NFS_MOUNT_PATH'] ?? '/mnt/pan-agent-nfs';
@@ -51,10 +51,34 @@ export async function listMemoryFiles(slug: string): Promise<MemoryFileInfo[]> {
   return files.filter((f): f is MemoryFileInfo => f !== null).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Removes any MEMORY.md index line referencing `fileName` (the model's own
+ * markdown-link index format: `- [Title](fileName) — hook`) — otherwise a
+ * deleted topic file leaves a stale, misleading pointer behind that the
+ * model may find before it next touches memory itself.
+ */
+async function pruneMemoryIndex(slug: string, fileName: string): Promise<void> {
+  const indexPath = path.join(personMemoryDir(slug), 'MEMORY.md');
+  let content: string;
+  try {
+    content = await readFile(indexPath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  const marker = `](${fileName})`;
+  const pruned = content
+    .split('\n')
+    .filter((line) => !line.includes(marker))
+    .join('\n');
+  if (pruned !== content) await writeFile(indexPath, pruned);
+}
+
 /** Deletes one memory file by exact name. Only ever deletes a name that showed up in listMemoryFiles — no path traversal surface. */
 export async function deleteMemoryFile(slug: string, name: string): Promise<boolean> {
   const files = await listMemoryFiles(slug);
   if (!files.some((f) => f.name === name)) return false;
   await unlink(path.join(personMemoryDir(slug), name));
+  if (name !== 'MEMORY.md') await pruneMemoryIndex(slug, name);
   return true;
 }

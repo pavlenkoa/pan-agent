@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -67,5 +67,35 @@ describe('deleteMemoryFile', () => {
     const memDir = path.join(dir, 'people', 'marta', 'claude', 'memory');
     await mkdir(memDir, { recursive: true });
     expect(await deleteMemoryFile('marta', 'does-not-exist.md')).toBe(false);
+  });
+
+  it('prunes the matching MEMORY.md index line when deleting a topic file', async () => {
+    const memDir = path.join(dir, 'people', 'oleh', 'claude', 'memory');
+    await mkdir(memDir, { recursive: true });
+    await writeFile(
+      path.join(memDir, 'MEMORY.md'),
+      [
+        '- [Address the user as ЧУВАККК](feedback_address_form.md) — explicit preference',
+        '- [Prefers terse replies](feedback_terse.md) — stated directly',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(memDir, 'feedback_address_form.md'), 'content');
+    await writeFile(path.join(memDir, 'feedback_terse.md'), 'content');
+
+    expect(await deleteMemoryFile('oleh', 'feedback_address_form.md')).toBe(true);
+
+    const index = await readFile(path.join(memDir, 'MEMORY.md'), 'utf8');
+    expect(index).not.toContain('feedback_address_form.md');
+    expect(index).toContain('feedback_terse.md');
+  });
+
+  it('does not try to prune the index when deleting MEMORY.md itself', async () => {
+    const memDir = path.join(dir, 'people', 'petro', 'claude', 'memory');
+    await mkdir(memDir, { recursive: true });
+    await writeFile(path.join(memDir, 'MEMORY.md'), '- [Something](note.md) — a note');
+
+    expect(await deleteMemoryFile('petro', 'MEMORY.md')).toBe(true);
+    expect(await listMemoryFiles('petro')).toEqual([]);
   });
 });

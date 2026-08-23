@@ -1,13 +1,19 @@
 /**
  * Self-service per-person commands intercepted from a person's own DM,
  * before routing — mirrors admin-commands.ts's shape, but scoped to the
- * sender's own slug/pod rather than gated on the global admin. `/set-var`
- * never becomes a turn: the value never enters the model's conversation,
- * turn logs, or Loki's assistant-turn logging, and it's applied by
- * restarting the person's own pod (same mechanism admin's /restart uses).
+ * sender's own slug/pod rather than gated on the global admin. The
+ * *values* in `/set-var`/`/unset-var` never become a turn — they never
+ * enter the model's conversation, turn logs, or Loki's assistant-turn
+ * logging, and are applied by restarting the person's own pod (same
+ * mechanism admin's /restart uses). Mutating commands do still let the
+ * model know something changed — see notifyModel below — since that fact
+ * itself (unlike the secret value) carries no sensitive material, and a
+ * model with no idea a command just ran can end up flatly contradicting
+ * the person about their own just-taken action.
  */
 import { log } from '../shared/log.js';
-import type { PersonIndexEntry } from '../shared/types.js';
+import type { ChatMessage, PersonIndexEntry } from '../shared/types.js';
+import { enqueueChatMessage } from './delivery.js';
 import { deleteMemoryFile, listMemoryFiles } from './nfs.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
@@ -55,25 +61,26 @@ export async function tryHandlePersonCommand(
   slug: string,
   person: PersonIndexEntry,
   text: string,
+  updateId: number,
 ): Promise<boolean> {
   const trimmed = text.trim();
   if (!trimmed.startsWith('/')) return false;
   const [cmd, ...args] = trimmed.split(/\s+/);
   switch (cmd) {
     case '/set-var':
-      await handleSetVar(deps, slug, person, args);
+      await handleSetVar(deps, slug, person, args, updateId);
       return true;
     case '/list-vars':
       await handleListVars(deps, slug, person);
       return true;
     case '/unset-var':
-      await handleUnsetVar(deps, slug, person, args);
+      await handleUnsetVar(deps, slug, person, args, updateId);
       return true;
     case '/memories':
       await handleListMemories(deps, slug, person);
       return true;
     case '/forget-memory':
-      await handleForgetMemory(deps, slug, person, args);
+      await handleForgetMemory(deps, slug, person, args, updateId);
       return true;
     default:
       return false;
@@ -84,7 +91,35 @@ async function restartToApply(deps: RouterDeps, slug: string, person: PersonInde
   await recreatePod(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken);
 }
 
-async function handleSetVar(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+/**
+ * Delivers a short informational note into the person's own live session —
+ * same ChatTurn/`/turn` pipeline a normal message takes (so it gets the
+ * exact same journal dedup and pod-not-ready retry behavior as any other
+ * chat message), just synthesized here instead of coming from Telegram. Not
+ * awaited by callers — the person's own deterministic command reply must
+ * not block on a live LLM turn, which can take much longer (and, right
+ * after /set-var or /unset-var, has to wait out a pod restart first).
+ * Fire-and-forget with its own error log instead of silent swallowing.
+ */
+function notifyModel(deps: RouterDeps, slug: string, person: PersonIndexEntry, updateId: number, note: string): void {
+  const message: ChatMessage = {
+    messageId: 0,
+    text: `[System note: ${note} Stay silent unless it's worth mentioning.]`,
+    fromHandle: null,
+    date: new Date().toISOString(),
+  };
+  void enqueueChatMessage(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken, updateId, message).catch(
+    (err) => log.error('person_command_notify_failed', err, { person: slug }),
+  );
+}
+
+async function handleSetVar(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
   const parsed = parseSetVarArgs(args);
   if ('error' in parsed) {
     await deps.telegram.sendMessage(person.chatId, parsed.error);
@@ -97,6 +132,8 @@ async function handleSetVar(deps: RouterDeps, slug: string, person: PersonIndexE
   );
   await restartToApply(deps, slug, person);
   log.line('custom_env_var_set', { person: slug, key: parsed.key });
+  const desc = parsed.description ? ` (${parsed.description})` : '';
+  notifyModel(deps, slug, person, updateId, `The person just set ${parsed.key}${desc} — it's in your Bash environment now.`);
 }
 
 async function handleListVars(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
@@ -110,7 +147,13 @@ async function handleListVars(deps: RouterDeps, slug: string, person: PersonInde
   await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
 }
 
-async function handleUnsetVar(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+async function handleUnsetVar(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
   const [key] = args;
   if (!key) {
     await deps.telegram.sendMessage(person.chatId, 'Usage: /unset-var KEY');
@@ -124,6 +167,7 @@ async function handleUnsetVar(deps: RouterDeps, slug: string, person: PersonInde
   await deps.telegram.sendMessage(person.chatId, `Unset ${key}. Restarting your pod to apply — back in a few seconds.`);
   await restartToApply(deps, slug, person);
   log.line('custom_env_var_unset', { person: slug, key });
+  notifyModel(deps, slug, person, updateId, `The person just unset ${key} — it's no longer in your Bash environment.`);
 }
 
 /**
@@ -142,7 +186,13 @@ async function handleListMemories(deps: RouterDeps, slug: string, person: Person
   await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
 }
 
-async function handleForgetMemory(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+async function handleForgetMemory(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
   const [name] = args;
   if (!name) {
     await deps.telegram.sendMessage(person.chatId, 'Usage: /forget-memory <filename> — see /memories for names.');
@@ -150,5 +200,14 @@ async function handleForgetMemory(deps: RouterDeps, slug: string, person: Person
   }
   const removed = await deleteMemoryFile(slug, name);
   await deps.telegram.sendMessage(person.chatId, removed ? `Forgot ${name}.` : `No such memory file: ${name}`);
-  if (removed) log.line('memory_file_forgotten', { person: slug, name });
+  if (removed) {
+    log.line('memory_file_forgotten', { person: slug, name });
+    notifyModel(
+      deps,
+      slug,
+      person,
+      updateId,
+      `The person just ran /forget-memory on ${name} — that memory file is gone, and its MEMORY.md index entry too. If they ask about it, it's really deleted, not still there.`,
+    );
+  }
 }
