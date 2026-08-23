@@ -83,3 +83,43 @@ export async function sendTelegramPhoto(
 ): Promise<void> {
   await uploadFile(token, 'sendPhoto', 'photo', chatId, fileName, bytes, caption);
 }
+
+export interface MediaGroupItem {
+  fileName: string;
+  bytes: Buffer;
+  asPhoto?: boolean;
+}
+
+/**
+ * Sends 2-10 files as one Telegram album (sendMediaGroup) — they land as a
+ * single grouped message instead of N separate ones. Telegram only accepts
+ * a caption on the first item of the group.
+ */
+export async function sendTelegramMediaGroup(
+  token: string,
+  chatId: number,
+  items: MediaGroupItem[],
+  caption?: string,
+): Promise<void> {
+  if (items.length < 2 || items.length > 10) {
+    throw new Error(`sendMediaGroup needs 2-10 items, got ${items.length}`);
+  }
+
+  const form = new FormData();
+  form.set('chat_id', String(chatId));
+  const media = items.map((item, i) => ({
+    type: item.asPhoto ? 'photo' : 'document',
+    media: `attach://file${i}`,
+    ...(i === 0 && caption ? { caption } : {}),
+  }));
+  form.set('media', JSON.stringify(media));
+  items.forEach((item, i) => form.set(`file${i}`, new Blob([item.bytes]), item.fileName));
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  });
+  const data = (await res.json()) as { ok: boolean; description?: string };
+  if (!data.ok) throw new Error(`sendMediaGroup failed: ${data.description ?? res.status}`);
+}

@@ -45,6 +45,10 @@ data:
     caps bot uploads at 50MB; if a file is bigger, say so rather than trying. There's no way to
     send a file except this tool — don't tell the user you "can't send files," you can.
 
+    Sending more than one file? Pass all the paths in a single `send_file` call (up to 10) — they
+    land as one grouped album message instead of separate ones. Don't zip multiple files together
+    as a workaround; the tool already handles multiple files natively.
+
     ## MANDATORY: scheduled tasks
 
     Use the `schedule_task` / `list_tasks` / `cancel_task` tools for anything recurring. The

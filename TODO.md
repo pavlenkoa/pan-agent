@@ -392,3 +392,28 @@ unlike the old `runTurn` which was a thin pass-through to the live SDK).
       limits are currently 512Mi request / 2Gi limit; worth a look at actual
       usage after this has been live a while, at only 2 active people this
       is very unlikely to matter yet.
+
+### Session 2026-08-23 (cont.): multi-file sends
+
+Live-reported: asked the bot to send two already-downloaded .torrent files
+in one message — `send_file` only took one path at a time, so the model
+zipped both into an archive as a workaround and sent that instead of an
+actual two-file message. Telegram supports this natively (`sendMediaGroup`,
+2-10 items grouped into one album-style message) and we'd just never wired
+it up.
+
+- `runner/telegram-send.ts`: new `sendTelegramMediaGroup` — multipart
+  `media` JSON array of `attach://fileN` refs, one Blob per file, caption
+  only on the first item (Telegram's own restriction).
+- `runner/attachment-tools.ts`: `send_file`'s schema changed from a single
+  `path` to `paths: string[]` (1-10). One path keeps the exact old
+  single-file behavior (`sendDocument`/`sendPhoto`); 2+ paths validates and
+  reads every file up front (so an album never goes out half-sent on a
+  mid-batch failure) and sends them as one `sendMediaGroup` call.
+- Persona: added a line telling the model to pass multiple paths in one
+  call instead of zipping as a workaround.
+
+Typecheck, build, and all 41 existing tests still pass — no new tests added
+for the multipart-construction logic, matching this file's existing
+pattern of not unit-testing the thin Telegram-API-wrapper functions
+(`sendTelegramDocument`/`sendTelegramPhoto` were never tested either).
