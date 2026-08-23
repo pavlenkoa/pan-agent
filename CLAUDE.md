@@ -36,7 +36,7 @@ src/
     telegram.ts        # single getUpdates long-poll consumer + sendMessage/setMyCommands
     router.ts          # known/pending/denied routing, unknown-sender bootstrap
     admin-commands.ts  # /approve /deny /people /restart (admin DM only)
-    person-commands.ts # /set_var /list_vars /unset_var /memories /forget_memory (self-service)
+    person-commands.ts # /set_var family, /memories, /skills, /context, /effort, /context_limit, /compact, /clear (self-service)
     bot-commands.ts    # the two command lists + shared register/clear-menu helpers
     provisioning.ts    # telegramUserId + slug -> active person with a running pod
     people-index.ts    # pan-agent-people ConfigMap (routing index)
@@ -56,7 +56,7 @@ src/
     journal.ts               # NFS-backed idempotency ledger (dedup by updateId/task tuple)
     scheduling-tools.ts, attachment-tools.ts  # in-process MCP tools
     attachments.ts, telegram-send.ts          # inbound download / outbound send
-    index.ts                                   # /turn + /healthz HTTP server
+    index.ts                                   # /turn + /control + /healthz HTTP server
 helm/pan-agent/         # the chart a deploying cluster's GitOps repo pulls
 ```
 
@@ -100,6 +100,25 @@ session. A stream crash retries in-process a bounded number of times
 (1s/2s/4s backoff) before `process.exit(1)`, letting k8s's `restartPolicy:
 Always` bring up a fresh container — simpler than an indefinite in-process
 supervisor.
+
+**Context management: app-enforced, not SDK-trusted.** Confirmed live
+2026-08-23: the SDK's own `autoCompactThreshold` scales with the model's
+context window (~96.6% of it observed in production, e.g. 934,000 of
+967,000) — it's the model's own last-resort safety net, not a usable budget.
+`session-controller.ts` tracks its own much tighter `contextLimit` (default
+250,000, live-configurable via `/context_limit`) and proactively pushes a
+real `/compact` once a turn's usage crosses it, independent of the SDK's own
+ceiling. `/compact` and `/clear` are genuine SDK-recognized commands
+(confirmed live: a real `compact_boundary`/`conversation_reset` protocol
+message, not a model reply) but only work as the *bare* command text — see
+the gotcha below. Every control turn (manual or auto-triggered) is bounded by
+`controlTurnTimeoutMs` (default 180s) since a resumed session's `/compact`
+has been observed to hang indefinitely with zero SDK output otherwise (root
+cause unconfirmed — leading hypothesis is NFS session-store I/O contention or
+pod-restart timing, not a deterministic bug). `/context`/`/effort` are live
+control-plane reads/writes against the person's already-running `Query`
+handle (`getContextUsage()`/`applyFlagSettings()`), routed through a
+dedicated `/control` endpoint since they aren't turns.
 
 **Scheduling: operator-owned, sweep-driven.** Task definitions live in the
 person's state ConfigMap. The operator sweeps every `SWEEP_INTERVAL_MS`
@@ -206,6 +225,27 @@ stdout to your log backend picks it up like any other pod.
   exists (for `/approve`). Anything both `provisioning.ts` and
   `admin-commands.ts` need (e.g. the bot-command lists) goes in a
   dependency-free module (`bot-commands.ts`), not inline in either.
+- **`/compact`/`/clear` must be the *bare* command text, nothing else in the
+  message.** Confirmed live 2026-08-23: pushing exactly `/compact` or
+  `/clear` onto the SDK stream produces a real `compact_boundary`/
+  `conversation_reset` protocol message — but a normal `ChatTurn` always gets
+  `${fromHandle}: ${text}` prefixed by `buildPrompt` (`sdk-session.ts`), and
+  that prefix is exactly what breaks it: the model sees "Andrii Pavlenko:
+  /compact" and answers it as a question instead of the SDK ever recognizing
+  the command (this shipped once, broke in production, and was only caught
+  because the person tried it live). Fixed via a dedicated `ControlTurn` kind
+  (`shared/types.ts`) that carries the bare text through the same `/turn`
+  delivery path (journal dedup, busy/retry) without the prefix — don't route
+  either command through `enqueueChatMessage`.
+- **Shared skills: one `SKILL-<name>.md` ConfigMap key per skill, not
+  hardcoded to `media`.** `runner/index.ts`'s `installPersonaFiles` installs
+  every `SKILL-<name>.md` key in the persona ConfigMap as
+  `.claude/skills/<name>/SKILL.md` for every person (media and
+  esputnik-query, as of 2026-08-23). `operator/nfs.ts`'s `SHARED_SKILL_NAMES`
+  set has to be kept in sync with those same names — it's what makes
+  `/skills`/`/forget_skill` treat them as unremovable shared state instead of
+  misreporting them as person-authored. Adding a third shared skill means
+  updating both places.
 
 ## Non-goals (deferred, not forgotten)
 
@@ -229,6 +269,15 @@ auto-memory + `/memories`/`/forget_memory`, chat-scoped native Telegram
 command menus, per-person custom **Skills** (model-authored
 `.claude/skills/<name>/SKILL.md` in the person's own workspace via native
 SDK `Skill`-tool invocation, plus `/skills`/`/forget_skill` for oversight —
-same shape as the memory work, no ConfigMap involved). A full security
-review of credential handling, the attachment path allowlist, MCP tool
-surface, and NFS isolation has been done once; not a recurring process yet.
+same shape as the memory work, no ConfigMap involved). **Shared** skills are
+now a generalized, N-skill mechanism (one `SKILL-<name>.md` ConfigMap key
+each) rather than hardcoded to `media` alone — `esputnik-query` (read-only
+eSputnik API queries) is the second one, added 2026-08-23. Session
+management is now person-facing too: `/context` (live token-usage snapshot),
+`/effort` (session-scoped effort level), `/context_limit` (app-enforced
+auto-compact ceiling, default 250,000 — the SDK's own internal ceiling scales
+with the model's window and isn't a usable budget), `/compact`, `/clear` —
+all live control-plane operations against the person's already-running
+session, not turns handled by the model. A full security review of
+credential handling, the attachment path allowlist, MCP tool surface, and
+NFS isolation has been done once; not a recurring process yet.

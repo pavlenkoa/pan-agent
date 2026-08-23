@@ -33,8 +33,8 @@ src/
   shared/     types + helpers shared between operator and runner
   operator/   Deployment (1 replica): Telegram ingress, people index,
               pod lifecycle, task sweep, /tasks API, admin + person commands
-  runner/     runs inside every person pod: persistent SDK session, /turn
-              HTTP server, journal-based dedup, MCP tools (scheduling,
+  runner/     runs inside every person pod: persistent SDK session, /turn +
+              /control HTTP server, journal-based dedup, MCP tools (scheduling,
               attachments), direct Telegram replies
 helm/
   pan-agent/  the Helm chart a deploying cluster's GitOps repo pulls
@@ -76,6 +76,13 @@ helm/
 | `/unset_var KEY` | Remove a custom env var (restarts to apply) |
 | `/memories` | List what the assistant remembers about you |
 | `/forget_memory <filename>` | Delete one memory file |
+| `/skills` | List custom skills the assistant has built for you |
+| `/forget_skill <name>` | Delete one custom skill |
+| `/context` | Show current model, effort, token usage, and auto-compact limit |
+| `/effort [low\|medium\|high\|xhigh]` | Show or set model effort for this session (resets on pod restart) |
+| `/context_limit [tokens]` | Show or set your auto-compact token ceiling (default 250,000; resets on pod restart) |
+| `/compact` | Manually compact your conversation history now |
+| `/clear` | Start a fresh conversation (memory/tasks unaffected) |
 
 All of the above are intercepted before the message ever reaches the model — the
 Telegram `/` menu is registered per-chat, so an unapproved sender never even sees
