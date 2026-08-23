@@ -3,9 +3,8 @@
  * shared by the admin's /approve command and the allowlist auto-approve path
  * (router.ts).
  */
-import { log } from '../shared/log.js';
 import type { PeopleIndex, PersonIndexEntry } from '../shared/types.js';
-import { commandsForChat } from './bot-commands.js';
+import { registerCommandsFor } from './bot-commands.js';
 import { approvePerson } from './people-index.js';
 import { ensurePersonPod, waitForPodReady } from './pod-lifecycle.js';
 import { ensurePersonState } from './person-state.js';
@@ -21,25 +20,8 @@ export async function provisionPerson(
   await ensurePersonState(deps.api, deps.cfg.namespace, slug, displayName);
   await ensurePersonPod(deps.api, deps.cfg, slug, entry.chatId, entry.tz, entry.tasksToken);
   const ready = await waitForPodReady(deps.api, deps.cfg.namespace, slug, deps.cfg.podReadyTimeoutMs);
-  await registerCommandsFor(deps, telegramUserId, entry.chatId);
+  await registerCommandsFor(deps.telegram, telegramUserId, entry.chatId, telegramUserId === deps.cfg.telegramAdminChatId);
   return { entry, ready };
-}
-
-/**
- * Chat-scoped only — never a default/global scope — so an unapproved
- * sender's chat has no registered `/` suggestions at all (see telegram.ts's
- * setMyCommands doc comment). Best-effort: a failure here shouldn't fail the
- * whole approval, the person is already usable without the menu.
- */
-async function registerCommandsFor(deps: RouterDeps, telegramUserId: number, chatId: number): Promise<void> {
-  try {
-    await deps.telegram.setMyCommands(commandsForChat(telegramUserId === deps.cfg.telegramAdminChatId), {
-      type: 'chat',
-      chat_id: chatId,
-    });
-  } catch (err) {
-    log.error('set_my_commands_failed', err, { telegramUserId });
-  }
 }
 
 /**

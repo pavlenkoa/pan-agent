@@ -5,7 +5,7 @@
  */
 import { log } from '../shared/log.js';
 import type { PeopleIndex, TaskTurn } from '../shared/types.js';
-import { commandsForChat } from './bot-commands.js';
+import { clearCommandsFor, registerCommandsFor } from './bot-commands.js';
 import { loadOperatorConfig, type OperatorConfig } from './config.js';
 import { deliverTaskTurn } from './delivery.js';
 import { makeCoreV1Api } from './k8s.js';
@@ -18,28 +18,22 @@ import { pollUpdates, TelegramClient } from './telegram.js';
 
 /**
  * Re-asserts the `/` suggestion popup on every active person's chat (plus
- * the admin's, combined with admin commands) on every boot — cheap at this
- * scale, and covers both drift (a chat's registration was never set, e.g.
- * approved before this feature existed) and the admin's chat specifically,
- * which needs the combined list regardless of whether/when they were ever
- * routed through provisionPerson. Best-effort per chat: one failure doesn't
- * stop the operator from starting.
+ * the admin's, combined with admin commands), and re-clears it for every
+ * denied person, on every boot — cheap at this scale, and self-heals drift:
+ * a chat approved before this feature existed, or a person denied while a
+ * prior setMyCommands call happened to fail, both converge to correct on
+ * the next restart without needing a manual fix.
  */
 async function registerAllBotCommands(telegram: TelegramClient, cfg: OperatorConfig, idx: PeopleIndex): Promise<void> {
-  const chats = new Map<number, number>(); // telegramUserId -> chatId
-  chats.set(cfg.telegramAdminChatId, cfg.telegramAdminChatId);
+  await registerCommandsFor(telegram, cfg.telegramAdminChatId, cfg.telegramAdminChatId, true);
   for (const person of Object.values(idx.people)) {
-    if (person.status === 'active') chats.set(person.telegramUserId, person.chatId);
+    if (person.status !== 'active' || person.telegramUserId === cfg.telegramAdminChatId) continue;
+    await registerCommandsFor(telegram, person.telegramUserId, person.chatId, false);
   }
-  for (const [telegramUserId, chatId] of chats) {
-    try {
-      await telegram.setMyCommands(commandsForChat(telegramUserId === cfg.telegramAdminChatId), {
-        type: 'chat',
-        chat_id: chatId,
-      });
-    } catch (err) {
-      log.error('set_my_commands_failed', err, { telegramUserId });
-    }
+  for (const telegramUserIdStr of Object.keys(idx.denied)) {
+    const telegramUserId = Number(telegramUserIdStr);
+    // DM chat_id equals the Telegram user id for private chats (people-index.ts).
+    await clearCommandsFor(telegram, telegramUserId, telegramUserId);
   }
 }
 

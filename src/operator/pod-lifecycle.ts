@@ -54,6 +54,12 @@ export async function podExists(api: CoreV1Api, namespace: string, slug: string)
   return (await getPod(api, namespace, podName(slug))) !== null;
 }
 
+/** Tears down a person's running pod without touching their PersonState ConfigMap — used by /deny. */
+export async function removePersonPod(api: CoreV1Api, namespace: string, slug: string): Promise<void> {
+  await deletePod(api, namespace, podName(slug));
+  log.line('pod_removed', { person: slug });
+}
+
 export async function recreatePod(
   api: CoreV1Api,
   cfg: OperatorConfig,

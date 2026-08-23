@@ -114,10 +114,21 @@ export async function backfillTasksTokens(
   return { idx, backfilled };
 }
 
+/**
+ * Also flips an existing person's status to 'denied' (not just the top-level
+ * denied map) so a scheduled task can't resurrect their pod via the sweep
+ * (sweep.ts skips non-active people) — router.ts's denied-map check alone
+ * blocks new messages, but status is what the sweep looks at. The person's
+ * PersonState ConfigMap (tasks/profile/customEnv) is left untouched so a
+ * later /approve picks up right where they left off.
+ */
 export async function denyPerson(api: CoreV1Api, namespace: string, telegramUserId: number): Promise<PeopleIndex> {
   return mutatePeopleIndex(api, namespace, (idx) => {
     idx.denied[String(telegramUserId)] = { deniedAt: new Date().toISOString() };
     delete idx.pending[String(telegramUserId)];
+    const slug = findSlugByTelegramUserId(idx, telegramUserId);
+    const entry = slug ? idx.people[slug] : undefined;
+    if (entry) entry.status = 'denied';
     return idx;
   });
 }

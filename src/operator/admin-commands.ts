@@ -5,9 +5,10 @@
  * to the admin's own person-pod — the admin is also a tenant.
  */
 import { log } from '../shared/log.js';
+import { clearCommandsFor } from './bot-commands.js';
 import { enqueueChatMessage } from './delivery.js';
-import { denyPerson, readPeopleIndex } from './people-index.js';
-import { recreatePod } from './pod-lifecycle.js';
+import { denyPerson, findSlugByTelegramUserId, readPeopleIndex } from './people-index.js';
+import { recreatePod, removePersonPod } from './pod-lifecycle.js';
 import { provisionPerson } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
 import type { TelegramUpdate } from './telegram.js';
@@ -82,9 +83,18 @@ async function handleDeny(deps: RouterDeps, args: string[]): Promise<void> {
     await deps.telegram.sendMessage(admin, 'Usage: /deny <telegramUserId>');
     return;
   }
-  await denyPerson(deps.api, deps.cfg.namespace, telegramUserId);
-  await deps.telegram.sendMessage(admin, `Denied ${telegramUserId}.`);
-  log.line('person_denied', { telegramUserId });
+  const idx = await denyPerson(deps.api, deps.cfg.namespace, telegramUserId);
+  const slug = findSlugByTelegramUserId(idx, telegramUserId);
+  if (slug) await removePersonPod(deps.api, deps.cfg.namespace, slug);
+  // DM chat_id equals the Telegram user id for private chats — clears the
+  // `/` popup immediately rather than waiting for the next operator boot's
+  // backfill (index.ts) to catch it.
+  await clearCommandsFor(deps.telegram, telegramUserId, telegramUserId);
+  await deps.telegram.sendMessage(
+    admin,
+    slug ? `Denied ${telegramUserId} and removed pod for ${slug} (state kept for a future /approve).` : `Denied ${telegramUserId}.`,
+  );
+  log.line('person_denied', { telegramUserId, slug });
 }
 
 async function handlePeople(deps: RouterDeps): Promise<void> {

@@ -7,7 +7,8 @@
  * imports of its own beyond the Telegram type, so both sides can depend on
  * it safely.
  */
-import type { BotCommand } from './telegram.js';
+import { log } from '../shared/log.js';
+import type { BotCommand, TelegramClient } from './telegram.js';
 
 /** Registered only on the admin's own chat — see operator/index.ts. */
 export const ADMIN_COMMANDS: BotCommand[] = [
@@ -34,4 +35,39 @@ export const PERSON_COMMANDS: BotCommand[] = [
 /** The admin is also a tenant (router.ts) — their chat gets both lists. */
 export function commandsForChat(isAdmin: boolean): BotCommand[] {
   return isAdmin ? [...ADMIN_COMMANDS, ...PERSON_COMMANDS] : PERSON_COMMANDS;
+}
+
+/**
+ * Registers the `/` popup for a newly-approved chat — chat-scoped only (see
+ * telegram.ts's setMyCommands doc comment). Best-effort: a failure here
+ * shouldn't fail the whole approval, the person is already usable without
+ * the menu.
+ */
+export async function registerCommandsFor(
+  telegram: TelegramClient,
+  telegramUserId: number,
+  chatId: number,
+  isAdmin: boolean,
+): Promise<void> {
+  try {
+    await telegram.setMyCommands(commandsForChat(isAdmin), { type: 'chat', chat_id: chatId });
+  } catch (err) {
+    log.error('set_my_commands_failed', err, { telegramUserId });
+  }
+}
+
+/**
+ * Clears a chat's `/` popup entirely (e.g. on /deny) — registration is
+ * sticky on Telegram's side, nothing else ever un-sets it, so without this
+ * a denied person keeps seeing every command listed (though none of them
+ * can actually do anything: router.ts drops a denied sender's messages
+ * before any command dispatch runs — this is a discoverability fix, not an
+ * access-control one). Best-effort, same as registerCommandsFor.
+ */
+export async function clearCommandsFor(telegram: TelegramClient, telegramUserId: number, chatId: number): Promise<void> {
+  try {
+    await telegram.setMyCommands([], { type: 'chat', chat_id: chatId });
+  } catch (err) {
+    log.error('set_my_commands_failed', err, { telegramUserId });
+  }
 }
