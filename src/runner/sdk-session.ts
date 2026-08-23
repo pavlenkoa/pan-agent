@@ -111,7 +111,7 @@ const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetc
  * Subdirectory name under claudeHome for the SDK's native auto-memory store
  * — pinned explicitly (rather than left to the SDK's own
  * `~/.claude/projects/<sanitized-cwd>/memory/` default) so the operator's
- * /memories and /forget-memory commands (person-commands.ts, via
+ * /memories and /forget_memory commands (person-commands.ts, via
  * operator/nfs.ts) know exactly where to look without having to reproduce
  * the SDK's cwd-sanitization scheme. Already lands inside the per-person NFS
  * mount either way (claudeHome IS the mounted volume for this user), so

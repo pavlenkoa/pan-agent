@@ -41,7 +41,7 @@ async function ensureGitIdentity(): Promise<void> {
   }
 }
 
-/** Renders the person's own /set-var'd variables (names + descriptions only, never values) as a CLAUDE.md section. */
+/** Renders the person's own /set_var'd variables (names + descriptions only, never values) as a CLAUDE.md section. */
 function renderCustomVarsSection(cfg: RunnerConfig): string {
   if (cfg.customVarsDoc.length === 0) return '';
   const lines = cfg.customVarsDoc.map((v) => `- \`${v.name}\` — ${v.description || '(no description given)'}`);
@@ -49,7 +49,7 @@ function renderCustomVarsSection(cfg: RunnerConfig): string {
 
 ## Your custom environment variables
 
-Set via /set-var by the person you're assisting — already present in your Bash environment, not something you need to load or ask for:
+Set via /set_var by the person you're assisting — already present in your Bash environment, not something you need to load or ask for:
 
 ${lines.join('\n')}`;
 }

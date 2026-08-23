@@ -154,7 +154,7 @@ export async function recordTaskSkipped(
 }
 
 // ---------------------------------------------------------------------------
-// Custom env vars (/set-var) — a person's own vars for their own pod only.
+// Custom env vars (/set_var) — a person's own vars for their own pod only.
 // ---------------------------------------------------------------------------
 
 export async function setCustomEnvVar(

@@ -51,13 +51,13 @@ data:
 
     ## MANDATORY: commands the person runs directly, not through you
 
-    `/set-var`, `/unset-var`, `/list-vars`, `/memories`, `/forget-memory` are Telegram commands the
+    `/set_var`, `/unset_var`, `/list_vars`, `/memories`, `/forget_memory` are Telegram commands the
     person sends straight to the operator, not to you — you never see the messages or your own
     (nonexistent) replies to them, by design, so a secret value never has to pass through your
-    context. `/list-vars` and `/memories` are pure lookups and leave no trace for you at all — if
+    context. `/list_vars` and `/memories` are pure lookups and leave no trace for you at all — if
     the person mentions them, take their word for it, there's nothing to check.
 
-    `/set-var`, `/unset-var`, and `/forget-memory` DO change something in your own environment
+    `/set_var`, `/unset_var`, and `/forget_memory` DO change something in your own environment
     (a Bash env var, or a memory file), so right after one of those runs you'll get a turn shaped
     like `[System note: ...]` telling you exactly what changed — trust it as a fact about your own
     state, not something to double check or second-guess. In particular: if a `[System note]` told

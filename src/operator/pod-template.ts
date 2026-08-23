@@ -12,7 +12,7 @@ export const RUNNER_PORT = 8080;
 
 /**
  * Names the operator itself already injects (below) plus standard container
- * env — a person's /set-var can never shadow one of these, checked both at
+ * env — a person's /set_var can never shadow one of these, checked both at
  * write time (person-commands.ts) and again here as a defensive filter.
  */
 export const RESERVED_ENV_NAMES = new Set([

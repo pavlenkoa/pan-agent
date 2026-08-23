@@ -53,6 +53,17 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
+export interface BotCommand {
+  command: string;
+  description: string;
+}
+
+/** Chat-scoped only (never 'default'/'all_private_chats') — see setMyCommands' doc comment below for why. */
+export interface BotCommandScopeChat {
+  type: 'chat';
+  chat_id: number;
+}
+
 export class TelegramClient {
   constructor(private readonly token: string) {}
 
@@ -81,6 +92,27 @@ export class TelegramClient {
     });
     const data = (await res.json()) as TelegramApiResponse<unknown>;
     if (!data.ok) throw new Error(`sendMessage failed: ${data.description ?? res.status}`);
+  }
+
+  /**
+   * Registers the `/` suggestion popup for one specific chat — always called
+   * with a `chat` scope, never `default`/`all_private_chats`, so an
+   * unapproved sender's chat has no registered commands at all (not hidden
+   * client-side — Telegram's own servers have nothing to show them). This is
+   * a discoverability nicety only: actual command handling in router.ts
+   * already gates on person/admin status independent of what's registered
+   * here, so this call being skipped or failing never grants access to
+   * anything.
+   */
+  async setMyCommands(commands: BotCommand[], scope: BotCommandScopeChat): Promise<void> {
+    const res = await fetch(this.url('setMyCommands'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commands, scope }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = (await res.json()) as TelegramApiResponse<boolean>;
+    if (!data.ok) throw new Error(`setMyCommands failed: ${data.description ?? res.status}`);
   }
 }
 

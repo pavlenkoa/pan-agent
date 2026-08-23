@@ -110,7 +110,7 @@ export interface PersonRuntime {
   lastDeliveredUpdateId: number | null;
 }
 
-/** A person's own custom env var, set via /set-var. Injected into their pod's env at pod-create time. */
+/** A person's own custom env var, set via /set_var. Injected into their pod's env at pod-create time. */
 export interface CustomEnvVar {
   value: string;
   description: string;

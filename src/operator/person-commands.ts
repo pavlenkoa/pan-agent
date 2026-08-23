@@ -2,7 +2,7 @@
  * Self-service per-person commands intercepted from a person's own DM,
  * before routing — mirrors admin-commands.ts's shape, but scoped to the
  * sender's own slug/pod rather than gated on the global admin. The
- * *values* in `/set-var`/`/unset-var` never become a turn — they never
+ * *values* in `/set_var`/`/unset_var` never become a turn — they never
  * enter the model's conversation, turn logs, or Loki's assistant-turn
  * logging, and are applied by restarting the person's own pod (same
  * mechanism admin's /restart uses). Mutating commands do still let the
@@ -29,16 +29,16 @@ interface ParsedSetVar {
 }
 
 /**
- * Pure parser for `/set-var KEY=VALUE [description...]` — split out from the
+ * Pure parser for `/set_var KEY=VALUE [description...]` — split out from the
  * k8s-touching handler below so the grammar/validation rules are unit
  * testable without a fake k8s client (same pattern as isAuthorized in
  * tasks-api.ts). `args` is the command text already split on whitespace with
- * the `/set-var` token itself removed.
+ * the `/set_var` token itself removed.
  */
 export function parseSetVarArgs(args: string[]): ParsedSetVar | { error: string } {
   const [kv, ...descParts] = args;
   if (!kv || !kv.includes('=')) {
-    return { error: 'Usage: /set-var KEY=VALUE [description]' };
+    return { error: 'Usage: /set_var KEY=VALUE [description]' };
   }
   const eq = kv.indexOf('=');
   const key = kv.slice(0, eq);
@@ -67,19 +67,19 @@ export async function tryHandlePersonCommand(
   if (!trimmed.startsWith('/')) return false;
   const [cmd, ...args] = trimmed.split(/\s+/);
   switch (cmd) {
-    case '/set-var':
+    case '/set_var':
       await handleSetVar(deps, slug, person, args, updateId);
       return true;
-    case '/list-vars':
+    case '/list_vars':
       await handleListVars(deps, slug, person);
       return true;
-    case '/unset-var':
+    case '/unset_var':
       await handleUnsetVar(deps, slug, person, args, updateId);
       return true;
     case '/memories':
       await handleListMemories(deps, slug, person);
       return true;
-    case '/forget-memory':
+    case '/forget_memory':
       await handleForgetMemory(deps, slug, person, args, updateId);
       return true;
     default:
@@ -98,7 +98,7 @@ async function restartToApply(deps: RouterDeps, slug: string, person: PersonInde
  * chat message), just synthesized here instead of coming from Telegram. Not
  * awaited by callers — the person's own deterministic command reply must
  * not block on a live LLM turn, which can take much longer (and, right
- * after /set-var or /unset-var, has to wait out a pod restart first).
+ * after /set_var or /unset_var, has to wait out a pod restart first).
  * Fire-and-forget with its own error log instead of silent swallowing.
  */
 function notifyModel(deps: RouterDeps, slug: string, person: PersonIndexEntry, updateId: number, note: string): void {
@@ -156,7 +156,7 @@ async function handleUnsetVar(
 ): Promise<void> {
   const [key] = args;
   if (!key) {
-    await deps.telegram.sendMessage(person.chatId, 'Usage: /unset-var KEY');
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /unset_var KEY');
     return;
   }
   const removed = await removeCustomEnvVar(deps.api, deps.cfg.namespace, slug, key);
@@ -171,10 +171,10 @@ async function handleUnsetVar(
 }
 
 /**
- * /memories and /forget-memory manage the SDK's native auto-memory store
+ * /memories and /forget_memory manage the SDK's native auto-memory store
  * directly on the NFS mount (operator/nfs.ts) — no pod restart needed either
  * way, since the runner reads these files fresh on demand each turn rather
- * than baking them into the pod spec the way /set-var's env vars are.
+ * than baking them into the pod spec the way /set_var's env vars are.
  */
 async function handleListMemories(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
   const files = await listMemoryFiles(slug);
@@ -195,7 +195,7 @@ async function handleForgetMemory(
 ): Promise<void> {
   const [name] = args;
   if (!name) {
-    await deps.telegram.sendMessage(person.chatId, 'Usage: /forget-memory <filename> — see /memories for names.');
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /forget_memory <filename> — see /memories for names.');
     return;
   }
   const removed = await deleteMemoryFile(slug, name);
@@ -207,7 +207,7 @@ async function handleForgetMemory(
       slug,
       person,
       updateId,
-      `The person just ran /forget-memory on ${name} — that memory file is gone, and its MEMORY.md index entry too. If they ask about it, it's really deleted, not still there.`,
+      `The person just ran /forget_memory on ${name} — that memory file is gone, and its MEMORY.md index entry too. If they ask about it, it's really deleted, not still there.`,
     );
   }
 }
