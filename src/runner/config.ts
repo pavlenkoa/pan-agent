@@ -4,6 +4,25 @@ function requireEnv(name: string): string {
   return v;
 }
 
+export interface CustomVarDoc {
+  name: string;
+  description: string;
+}
+
+/** PERSON_CUSTOM_VARS_DOC is a JSON array of {name, description} — names/descriptions only, never values (the values are already real env vars by the time this process starts). */
+function parseCustomVarsDoc(raw: string | undefined): CustomVarDoc[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (v): v is CustomVarDoc => typeof v === 'object' && v !== null && typeof v.name === 'string' && typeof v.description === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
 export interface RunnerConfig {
   slug: string;
   chatId: number;
@@ -16,6 +35,7 @@ export interface RunnerConfig {
   workspaceCwd: string;
   claudeHome: string;
   sessionIdFile: string;
+  customVarsDoc: CustomVarDoc[];
 }
 
 export function loadRunnerConfig(): RunnerConfig {
@@ -32,5 +52,6 @@ export function loadRunnerConfig(): RunnerConfig {
     workspaceCwd: process.env['WORKSPACE_CWD'] ?? '/home/claude/workspace',
     claudeHome,
     sessionIdFile: process.env['SESSION_ID_FILE'] ?? `${claudeHome}/pan-agent-session-id`,
+    customVarsDoc: parseCustomVarsDoc(process.env['PERSON_CUSTOM_VARS_DOC']),
   };
 }

@@ -9,6 +9,7 @@ import { log } from '../shared/log.js';
 import { tryHandleAdminCommand } from './admin-commands.js';
 import { enqueueChatMessage } from './delivery.js';
 import { findSlugByTelegramUserId, readPeopleIndex, recordPending, touchLastSeen } from './people-index.js';
+import { tryHandlePersonCommand } from './person-commands.js';
 import { provisionPerson, slugifyForPerson, uniqueSlug } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
 import type { TelegramMessage, TelegramUpdate } from './telegram.js';
@@ -52,6 +53,9 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   }
   const person = idx.people[slug];
   if (!person || person.status !== 'active') return;
+
+  const handled = await tryHandlePersonCommand(deps, slug, person, msg.text ?? '');
+  if (handled) return;
 
   await touchLastSeen(deps.api, deps.cfg.namespace, slug);
   await enqueueChatMessage(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken, update.update_id, {

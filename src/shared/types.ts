@@ -110,11 +110,19 @@ export interface PersonRuntime {
   lastDeliveredUpdateId: number | null;
 }
 
+/** A person's own custom env var, set via /set-var. Injected into their pod's env at pod-create time. */
+export interface CustomEnvVar {
+  value: string;
+  description: string;
+  setAt: string; // ISO 8601
+}
+
 export interface PersonState {
   version: 1;
   profile: PersonProfile;
   tasks: TaskRecord[];
   runtime: PersonRuntime;
+  customEnv: Record<string, CustomEnvVar>; // keyed by var name
 }
 
 export function emptyPersonState(displayName: string): PersonState {
@@ -123,6 +131,7 @@ export function emptyPersonState(displayName: string): PersonState {
     profile: { displayName, notes: '' },
     tasks: [],
     runtime: { lastDeliveredUpdateId: null },
+    customEnv: {},
   };
 }
 

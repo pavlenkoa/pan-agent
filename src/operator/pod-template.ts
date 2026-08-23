@@ -5,9 +5,37 @@
  */
 import type { V1Pod } from '@kubernetes/client-node';
 
+import type { CustomEnvVar } from '../shared/types.js';
 import type { OperatorConfig } from './config.js';
 
 export const RUNNER_PORT = 8080;
+
+/**
+ * Names the operator itself already injects (below) plus standard container
+ * env — a person's /set-var can never shadow one of these, checked both at
+ * write time (person-commands.ts) and again here as a defensive filter.
+ */
+export const RESERVED_ENV_NAMES = new Set([
+  'PERSON_SLUG',
+  'PERSON_CHAT_ID',
+  'PERSON_TASKS_TOKEN',
+  'PERSON_CUSTOM_VARS_DOC',
+  'TZ',
+  'LANG',
+  'OPERATOR_TASKS_URL',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'TOLOKA_USERNAME',
+  'TOLOKA_PASSWORD',
+  'EMBY_API_KEY',
+  'TMDB_API_KEY',
+  'GH_TOKEN',
+  'SEEDPOOL_API_KEY',
+  'PATH',
+  'HOME',
+  'NODE_ENV',
+  'PORT',
+]);
 
 export function podName(slug: string): string {
   return `person-${slug}`;
@@ -23,9 +51,12 @@ export function buildPersonPodSpec(
   chatId: number,
   tz: string,
   tasksToken: string,
+  customEnv: Record<string, CustomEnvVar> = {},
 ): V1Pod {
   const name = podName(slug);
   const peopleHome = `${cfg.nfsRootPath}/people/${slug}`;
+  const customEnvEntries = Object.entries(customEnv).filter(([key]) => !RESERVED_ENV_NAMES.has(key));
+  const customVarsDoc = customEnvEntries.map(([varName, v]) => ({ name: varName, description: v.description }));
   return {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -63,6 +94,8 @@ export function buildPersonPodSpec(
             secretEnv('TMDB_API_KEY', 'pan-agent-tmdb', 'TMDB_API_KEY'),
             secretEnv('GH_TOKEN', 'pan-agent-github', 'GH_TOKEN'),
             secretEnv('SEEDPOOL_API_KEY', 'pan-agent-seedpool', 'SEEDPOOL_API_KEY'),
+            { name: 'PERSON_CUSTOM_VARS_DOC', value: JSON.stringify(customVarsDoc) },
+            ...customEnvEntries.map(([varName, v]) => ({ name: varName, value: v.value })),
           ],
           ports: [{ containerPort: RUNNER_PORT, name: 'http' }],
           resources: {

@@ -14,7 +14,7 @@
  * async steps.
  */
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -41,6 +41,19 @@ async function ensureGitIdentity(): Promise<void> {
   }
 }
 
+/** Renders the person's own /set-var'd variables (names + descriptions only, never values) as a CLAUDE.md section. */
+function renderCustomVarsSection(cfg: RunnerConfig): string {
+  if (cfg.customVarsDoc.length === 0) return '';
+  const lines = cfg.customVarsDoc.map((v) => `- \`${v.name}\` — ${v.description || '(no description given)'}`);
+  return `
+
+## Your custom environment variables
+
+Set via /set-var by the person you're assisting — already present in your Bash environment, not something you need to load or ask for:
+
+${lines.join('\n')}`;
+}
+
 /**
  * The pan-agent-persona ConfigMap is mounted read-only at /config — that's
  * not a path the Claude Agent SDK's CLAUDE.md/skill auto-discovery ever
@@ -48,15 +61,19 @@ async function ensureGitIdentity(): Promise<void> {
  * <cwd>/.claude/skills/<name>/SKILL.md for project skills — matches what
  * CLAUDE.md itself already tells the model: "read .claude/skills/media/
  * SKILL.md in the workspace"). Copy it into place on every boot so a
- * ConfigMap update takes effect on the next pod restart.
+ * ConfigMap update takes effect on the next pod restart, appending the
+ * person's own custom-var doc (the runner has no k8s API access itself —
+ * see the NetworkPolicy's comment on this — so this comes in via the
+ * operator-set PERSON_CUSTOM_VARS_DOC env var instead of a direct read).
  */
 async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
   try {
-    await copyFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), path.join(cfg.claudeHome, 'CLAUDE.md'));
+    const sharedPersona = await readFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), 'utf8');
+    await writeFile(path.join(cfg.claudeHome, 'CLAUDE.md'), sharedPersona + renderCustomVarsSection(cfg));
     const mediaSkillDir = path.join(cfg.workspaceCwd, '.claude', 'skills', 'media');
     await mkdir(mediaSkillDir, { recursive: true });
     await copyFile(path.join(PERSONA_MOUNT_DIR, 'SKILL.md'), path.join(mediaSkillDir, 'SKILL.md'));
-    log.line('persona_installed', { person: cfg.slug });
+    log.line('persona_installed', { person: cfg.slug, customVars: cfg.customVarsDoc.length });
   } catch (err) {
     log.error('persona_install_failed', err, { person: cfg.slug });
   }

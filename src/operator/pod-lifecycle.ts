@@ -4,6 +4,7 @@ import { log } from '../shared/log.js';
 import type { OperatorConfig } from './config.js';
 import { createPod, deletePod, getPod, isPodReady } from './k8s.js';
 import { ensurePersonHomeDirs } from './nfs.js';
+import { readPersonState } from './person-state.js';
 import { buildPersonPodSpec, podName } from './pod-template.js';
 
 function sleep(ms: number): Promise<void> {
@@ -22,7 +23,8 @@ export async function ensurePersonPod(
   const existing = await getPod(api, cfg.namespace, podName(slug));
   if (existing) return;
   await ensurePersonHomeDirs(slug);
-  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken);
+  const state = await readPersonState(api, cfg.namespace, slug);
+  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken, state?.customEnv ?? {});
   await createPod(api, cfg.namespace, spec);
   log.line('pod_created', { person: slug });
 }

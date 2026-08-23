@@ -7,6 +7,7 @@
  * one-time query options built once at session start.
  */
 import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
@@ -106,11 +107,33 @@ const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetc
  * works: its `task_notification` lands on this same long-lived stream instead
  * of vanishing with a per-turn process.
  */
+/**
+ * Subdirectory name under claudeHome for the SDK's native auto-memory store
+ * — pinned explicitly (rather than left to the SDK's own
+ * `~/.claude/projects/<sanitized-cwd>/memory/` default) so the operator's
+ * /memories and /forget-memory commands (person-commands.ts, via
+ * operator/nfs.ts) know exactly where to look without having to reproduce
+ * the SDK's cwd-sanitization scheme. Already lands inside the per-person NFS
+ * mount either way (claudeHome IS the mounted volume for this user), so
+ * pinning it changes nothing about persistence — just the path shape.
+ */
+export const MEMORY_DIR_NAME = 'memory';
+
 export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): Options {
   return {
     cwd: cfg.workspaceCwd,
     ...(sessionId ? { resume: sessionId } : {}),
     permissionMode: 'acceptEdits',
+    // Explicit rather than relying on the SDK's own default-when-omitted
+    // behavior — guarantees the auto-memory instructions (and everything
+    // else the preset carries) are actually present regardless of SDK
+    // version. Layered underneath/alongside the persona's own CLAUDE.md,
+    // which is a separate discovery mechanism, not a systemPrompt swap.
+    systemPrompt: { type: 'preset', preset: 'claude_code' },
+    settings: {
+      autoMemoryEnabled: true,
+      autoMemoryDirectory: path.join(cfg.claudeHome, MEMORY_DIR_NAME),
+    },
     tools: BUILTIN_TOOLS,
     mcpServers: {
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
@@ -159,6 +182,16 @@ export function logSdkMessage(person: string, turnId: string, message: SDKMessag
   if (message.type === 'system' && message.subtype === 'compact_boundary') {
     const { trigger, pre_tokens, post_tokens } = message.compact_metadata;
     log.line('compact_boundary', { person, turn: turnId, trigger, preTokens: pre_tokens, postTokens: post_tokens });
+    return;
+  }
+  if (message.type === 'system' && message.subtype === 'memory_recall') {
+    log.line('memory_recall', {
+      person,
+      turn: turnId,
+      mode: message.mode,
+      count: message.memories.length,
+      paths: message.memories.map((m) => m.path),
+    });
     return;
   }
   if (message.type === 'assistant') {

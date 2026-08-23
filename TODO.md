@@ -426,15 +426,160 @@ pattern of not unit-testing the thin Telegram-API-wrapper functions
 Deployed and live-verified: asked for two files again, both arrived
 grouped in one Telegram album message instead of a zip.
 
+### Session 2026-08-23 (cont.): full-system security audit
+
+Manual pass (not the diff-based `/security-review` — branch was clean) over
+the whole repo, covering exactly the four areas the backlog item below asked
+for. Findings written up and handed to the user as a report; nothing fixed
+in-repo as a result of this pass alone (see the follow-up feature session
+right below, which touches some of the same files for an unrelated reason).
+
+- **Confirmed solid, no issues:** `/tasks` API cross-slug auth
+  (`timingSafeEqual`-checked per-slug bearer token), `send_file`'s path
+  allowlist (proper prefix-with-separator check, no traversal bypass),
+  inbound-attachment filename sanitization, slug generation (no injection
+  path from a crafted Telegram display name into ConfigMap/pod names or NFS
+  paths), admin-command gating, CI (pinned action SHAs, scoped
+  `GITHUB_TOKEN`). `/tracking` is one NFS mount shared across every person's
+  pod — confirmed intentional (persona docs it as shared household
+  torrent/subscription tracking), not an isolation bug.
+- **Medium-High, credential exposure:** every person pod holds *all* shared
+  service credentials as plaintext env vars, with zero `canUseTool` gating
+  (confirmed none exists anywhere in current runner source) and unrestricted
+  `0.0.0.0/0` internet egress. This is the known "no credential broker"
+  non-goal, but the concrete mechanism — a successful prompt injection via
+  `WebFetch`/tracker content could `curl` any of the seven credentials to an
+  attacker host with nothing in the stack to catch it — hadn't been spelled
+  out this precisely before. Still an open, accepted tradeoff.
+- **Medium, contingent on `GH_TOKEN` scope (can't see it from this repo):**
+  CI auto-builds+pushes `:latest` on every push to `main` with no required
+  review, and that one image runs for every tenant. If `GH_TOKEN` (handed to
+  every pod) has write access to this repo, one compromised/malicious
+  approved person could push a backdoored commit that gets built and
+  deployed to everyone. Worth confirming the token's actual scope.
+- **Low, defense-in-depth only:** the runner's `POST /turn` has no
+  application-layer auth at all — it's protected entirely by the
+  CiliumNetworkPolicy restricting ingress to the operator's pod label. No
+  path was found for a person's pod to forge that identity (no
+  `automountServiceAccountToken` override, no RBAC binding on the `default`
+  ServiceAccount found anywhere in homelab), so not concretely exploitable
+  today, but it's a single-layer control with no app-level backup (unlike
+  `/tasks`, which correctly has both).
+
+### Session 2026-08-23 (cont.): per-person persistent custom env vars (`/set-var`)
+
+Feature request straight out of the audit above: a way for an individual
+person to add their own credential (e.g. a personal API token) that survives
+pod restarts, is a real env var visible to their own Bash/tool calls, and is
+scoped to only their own pod — without needing a Vault/chart change per
+variable. Planned and approved before implementing (multi-file, touches the
+pod-spec/lifecycle/persona pipeline).
+
+Design (all self-service — every approved person manages only their own
+pod, no admin gating):
+- `/set-var KEY=VALUE [description]`, `/list-vars`, `/unset-var KEY` are
+  intercepted by the operator's router (`router.ts`, new
+  `operator/person-commands.ts`) **before** the message becomes a turn — the
+  value never enters the model's conversation, turn logs, or Loki's
+  assistant-turn logging. Key format + a `RESERVED_ENV_NAMES` check
+  (`pod-template.ts`, single source of truth for the names the operator
+  already injects) reject anything that would shadow a system credential.
+- Storage: `PersonState.customEnv` (new field on the existing
+  `pan-agent-person-<slug>` ConfigMap, same mechanism `tasksToken` already
+  uses) — `setCustomEnvVar`/`removeCustomEnvVar` in `person-state.ts`, built
+  on the existing `mutatePersonState`. Added `normalizePersonState()` so the
+  two already-live ConfigMaps (created before this field existed) backfill
+  `customEnv: {}` on read instead of crashing.
+- Apply mechanism: `/set-var`/`/unset-var` call the existing `recreatePod`
+  (same one admin's `/restart` already uses) — `pod-lifecycle.ts`'s
+  `ensurePersonPod`/`recreatePod` now internally read the person's state and
+  pass `customEnv` into `buildPersonPodSpec`, which appends each var as a
+  real `env:` entry (filtered again against `RESERVED_ENV_NAMES` as a
+  defensive belt-and-suspenders check). Session continuity survives the
+  restart as-is (`sessionIdFile` is NFS-persisted, SDK `resume` reattaches).
+- Auto-loaded instructions: the runner has no k8s API access by design (see
+  the NetworkPolicy's own comment on this), so it can't read `PersonState`
+  directly. Instead `buildPersonPodSpec` also injects
+  `PERSON_CUSTOM_VARS_DOC` — a JSON array of `{name, description}` only,
+  never values — which `runner/index.ts`'s `installPersonaFiles()` appends
+  as a "Your custom environment variables" section onto the per-person
+  `CLAUDE.md` on every boot (that function switched from `copyFile` to
+  read-then-write to allow the append).
+
+Typecheck, build, and all 55 tests pass (14 new: `person-commands.test.ts`
+covers the `/set-var` argument parser as a pure function — same pattern
+`isAuthorized`/`slugifyForPerson` already use for unit-testable logic split
+out from k8s-touching handlers; `pod-template.test.ts` covers custom vars
+landing in `env:` and the reserved-name collision being dropped in favor of
+the real secret). No test added for `person-state.ts`'s new mutators or
+`tryHandlePersonCommand` itself — consistent with the existing convention of
+not unit-testing ConfigMap-mutation glue (`people-index.ts`,
+`admin-commands.ts` have no test files either).
+
+**Not yet done:**
+- [ ] Not deployed or live-verified yet.
+- [ ] Confirm `GH_TOKEN`'s actual scope (flagged in the audit above) —
+      unrelated to this feature but worth doing while in this area.
+
+### Session 2026-08-23 (cont.): native auto-memory + `/memories`/`/forget-memory`
+
+Follow-up ask right after `/set-var`: richer info about how a token/var is
+actually used (beyond the one-line `/set-var` description), auto-loaded
+per pod on boot, that "would always remember." Before building a bespoke
+system, checked whether the Agent SDK already has this — it does, and it's
+exactly what was being asked for.
+
+Verified directly against the installed `@anthropic-ai/claude-agent-sdk`
+package's own `sdk.d.ts` (not just a subagent's claim, which the harness
+itself flagged as possibly instruction-shaped and which we independently
+confirmed rather than trusting): auto-memory is a real, first-class
+`Settings` field (`autoMemoryEnabled`/`autoMemoryDirectory`, settable inline
+via `Options.settings` — no file needed), on by default, using plain
+`Read`/`Write` (already in `BUILTIN_TOOLS`, no allowlist change needed), and
+part of Claude Code's default (`preset: 'claude_code'`) system prompt — the
+same "auto memory" behavior/instructions described in Claude Code's own
+system prompt. It's model-driven by design (the model decides on its own,
+mid-task, what's worth persisting — same behavior as this very assistant's
+own memory habit), which is the natural fit for "how ESPUTNIK_TOKEN's API
+works" getting captured the first time the model actually calls it, without
+any pan-agent-specific plumbing for that case.
+
+- `runner/sdk-session.ts`'s `buildQueryOptions`: added `systemPrompt: {
+  type: 'preset', preset: 'claude_code' }` (previously omitted — pins the
+  behavior explicitly rather than relying on the SDK's unconfirmed
+  omitted-default) and `settings: { autoMemoryEnabled: true,
+  autoMemoryDirectory: '<claudeHome>/memory' }`. The directory is pinned to
+  a known, simple path (rather than left to the SDK's own
+  `~/.claude/projects/<sanitized-cwd>/memory/` default) specifically so the
+  operator-side commands below know exactly where to look without
+  reproducing the SDK's cwd-sanitization scheme — it still lands inside the
+  same per-person NFS mount either way, since `claudeHome` *is* that mount.
+  Also added a `memory_recall` case to `logSdkMessage` (mirrors the existing
+  `compact_boundary` handling) so Loki shows which memory files got surfaced
+  into a turn.
+- Per your choice, added human-oversight commands that never touch the
+  model, mirroring `/list-vars`/`/unset-var`: `/memories` (list files with
+  size/mtime) and `/forget-memory <name>` (delete one). Unlike `/set-var`,
+  neither needs a pod restart — the runner reads memory files fresh each
+  turn rather than baking them into the pod spec. Implemented via direct
+  filesystem access on the operator's own NFS mount (`operator/nfs.ts`,
+  same pattern `ensurePersonHomeDirs` already uses) rather than routing
+  through the runner — `deleteMemoryFile` only ever deletes a name that
+  showed up in that same person's `listMemoryFiles` listing, so there's no
+  path-traversal surface from a crafted filename argument.
+
+Typecheck, build, and all 61 tests pass (7 new: `nfs.test.ts` covers
+`listMemoryFiles`/`deleteMemoryFile` against a real tmpdir — per-person
+scoping, missing-dir handling, and the no-path-traversal guarantee).
+
+**Not yet done:**
+- [ ] Not deployed or live-verified yet — in particular, worth confirming
+      live that the model actually does write memory files unprompted
+      during a normal task (expected per the SDK's documented behavior, but
+      hasn't been watched happen in this deployment specifically), and that
+      `/memories`/`/forget-memory` see the same files the runner writes
+      (confirms the pinned path assumption is correct end to end).
+
 ## Backlog
 
-- [ ] **Security review of the whole system** — hasn't had one beyond the
-      two issues found and fixed ad hoc during earlier sessions (the
-      `/tasks` API cross-slug authorization gap, and the operator's Cilium
-      egress policy). Worth a deliberate pass once the current round of
-      feature work settles down — credential/token handling (shared OAuth +
-      bot token, `PERSON_TASKS_TOKEN`), the attachment path-allowlist logic
-      in `attachment-tools.ts`/`attachments.ts`, MCP tool surface exposed to
-      each person's pod, and NFS-mounted workspace isolation between people
-      would all be worth a close look. Not urgent, no known live issue —
-      just hasn't been done yet.
+- [x] **Security review of the whole system** — done 2026-08-23, see above.

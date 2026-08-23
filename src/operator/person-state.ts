@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { CoreV1Api } from '@kubernetes/client-node';
 
-import { emptyPersonState, type PersonState, type TaskRecord } from '../shared/types.js';
+import { emptyPersonState, type CustomEnvVar, type PersonState, type TaskRecord } from '../shared/types.js';
 import { createJsonConfigMap, readJsonConfigMap, updateJsonConfigMap } from './k8s.js';
 
 const DATA_KEY = 'state.json';
@@ -19,6 +19,11 @@ function personLabels(slug: string): Record<string, string> {
   return { 'app.kubernetes.io/name': 'pan-agent', 'pan-agent.pavlenko.io/person': slug };
 }
 
+/** Backfills fields added after a person's state ConfigMap was first created (e.g. customEnv). */
+function normalizePersonState(state: PersonState): PersonState {
+  return { ...state, customEnv: state.customEnv ?? {} };
+}
+
 export async function ensurePersonState(
   api: CoreV1Api,
   namespace: string,
@@ -27,7 +32,7 @@ export async function ensurePersonState(
 ): Promise<PersonState> {
   const name = personConfigMapName(slug);
   const existing = await readJsonConfigMap<PersonState>(api, namespace, name, DATA_KEY);
-  if (existing) return existing.value;
+  if (existing) return normalizePersonState(existing.value);
   const created = await createJsonConfigMap(
     api,
     namespace,
@@ -41,7 +46,7 @@ export async function ensurePersonState(
 
 export async function readPersonState(api: CoreV1Api, namespace: string, slug: string): Promise<PersonState | null> {
   const existing = await readJsonConfigMap<PersonState>(api, namespace, personConfigMapName(slug), DATA_KEY);
-  return existing?.value ?? null;
+  return existing ? normalizePersonState(existing.value) : null;
 }
 
 export async function mutatePersonState(
@@ -57,7 +62,7 @@ export async function mutatePersonState(
     personConfigMapName(slug),
     DATA_KEY,
     () => emptyPersonState(displayNameForDefault),
-    mutate,
+    (state) => mutate(normalizePersonState(state)),
     personLabels(slug),
   );
 }
@@ -146,4 +151,35 @@ export async function recordTaskSkipped(
     state.tasks = state.tasks.map((t) => (t.id === taskId ? { ...t, lastStatus: 'skipped', nextRunAt } : t));
     return state;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Custom env vars (/set-var) — a person's own vars for their own pod only.
+// ---------------------------------------------------------------------------
+
+export async function setCustomEnvVar(
+  api: CoreV1Api,
+  namespace: string,
+  slug: string,
+  key: string,
+  value: string,
+  description: string,
+): Promise<void> {
+  const entry: CustomEnvVar = { value, description, setAt: new Date().toISOString() };
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    state.customEnv = { ...state.customEnv, [key]: entry };
+    return state;
+  });
+}
+
+export async function removeCustomEnvVar(api: CoreV1Api, namespace: string, slug: string, key: string): Promise<boolean> {
+  let removed = false;
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    if (!(key in state.customEnv)) return state;
+    removed = true;
+    const { [key]: _omit, ...rest } = state.customEnv;
+    state.customEnv = rest;
+    return state;
+  });
+  return removed;
 }
