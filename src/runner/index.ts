@@ -136,14 +136,19 @@ async function main(): Promise<void> {
         const result = await controller.submitTurn(turn, key);
         // A successful /compact or /clear produces an empty SDK result (confirmed
         // live: the SDK handles these as a protocol-level event, not a model
-        // turn) — synthesize a confirmation so the person sees *something*
-        // rather than silence.
+        // turn), and session-controller.ts's control-turn timeout also
+        // resolves with an empty, ok:false result rather than throwing —
+        // synthesize a reply for both cases so the person sees *something*
+        // rather than silence either way (confirmed live: silence is exactly
+        // what made a genuinely hung /compact read as "does nothing").
         const replyText =
           result.replyText ||
-          (turn.kind === 'control' && result.ok
-            ? turn.command === '/compact'
-              ? 'Compacted your conversation history.'
-              : 'Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
+          (turn.kind === 'control'
+            ? result.ok
+              ? turn.command === '/compact'
+                ? '✅ Compacted your conversation history.'
+                : '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
+              : `⚠️ ${turn.command} timed out — try again in a moment.`
             : '');
         if (replyText) {
           await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);

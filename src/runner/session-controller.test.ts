@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ChatTurn } from '../shared/types.js';
+import type { ChatTurn, ControlTurn } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import { createPushableQueue } from './pushable-queue.js';
 import type { SessionController } from './session-controller.js';
@@ -240,7 +240,7 @@ describe('createSessionController', () => {
       expect(sendTelegramReply).toHaveBeenCalledWith(
         cfg.telegramBotToken,
         cfg.chatId,
-        'Auto-compacted: context passed your 100-token limit.',
+        '✅ Auto-compacted: context passed your 100-token limit.',
       ),
     );
 
@@ -264,6 +264,30 @@ describe('createSessionController', () => {
     await flushMicrotasks();
     expect(controller.isBusy()).toBe(false);
     expect(sendTelegramReply).not.toHaveBeenCalled();
+  });
+
+  it('a control turn that never resolves times out and unblocks the queue for later turns', async () => {
+    // Confirmed live 2026-08-23: a real /compact on a resumed session hung
+    // for 2.5+ minutes with zero SDK output, wedging every later message.
+    // Reproduced here by simply never pushing a result for the control turn.
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents), 200); // short timeout for the test
+    await controller.start();
+    await flushMicrotasks();
+
+    const controlTurn: ControlTurn = { kind: 'control', updateId: 1, chatId: 111, command: '/compact' };
+    const turnPromise = controller.submitTurn(controlTurn, 'ctl-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+
+    await expect(turnPromise).resolves.toEqual({ replyText: '', ok: false });
+    expect(controller.isBusy()).toBe(false);
+
+    // The queue must be usable again — this is the actual bug: without the
+    // timeout, everything after the hung /compact stayed stuck forever.
+    const nextTurn = controller.submitTurn(chatTurn, 'turn-2');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('back to normal'));
+    await expect(nextTurn).resolves.toEqual({ replyText: 'back to normal', ok: true });
   });
 
   it('a queryFn that throws rejects the in-flight job instead of hanging', async () => {

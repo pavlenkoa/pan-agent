@@ -80,7 +80,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sdkQuery): SessionController {
+export function createSessionController(
+  cfg: RunnerConfig,
+  queryFn: QueryFn = sdkQuery,
+  controlTurnTimeoutMs = 180_000,
+): SessionController {
   const inputQueue = createPushableQueue<SDKUserMessage>();
   const reactionQueue: PendingReaction[] = [];
 
@@ -107,12 +111,56 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
     });
   }
 
+  /**
+   * `/compact`/`/clear` only, not chat/task turns — those can legitimately
+   * run long on real synchronous work (a big Bash download, etc.), a
+   * control turn has no legitimate reason to. Confirmed live 2026-08-23:
+   * `/compact` on a *resumed* session (the real production shape — my
+   * earlier verification only ever used fresh sessions) hung for 2.5+
+   * minutes with zero further SDK output, wedging the single-flight queue
+   * and every message the person sent after it. This is the safety net —
+   * `timeoutControlTurn` force-clears `currentJob` and best-effort
+   * `interrupt()`s the stuck call so the queue can move again, rather than
+   * trusting the SDK to always resolve control turns in reasonable time.
+   * `controlTurnTimeoutMs` is a constructor param (default 180s) rather than
+   * a local const so tests can shrink it instead of faking wall-clock time.
+   */
+  function timeoutControlTurn(turnId: string): void {
+    const job = currentJob;
+    if (!job || job.turnId !== turnId) return; // already resolved normally, or this timer is stale
+    currentJob = null;
+    log.error('control_turn_timed_out', new Error(`control turn exceeded ${controlTurnTimeoutMs}ms`), {
+      person: cfg.slug,
+      turn: turnId,
+      trigger: job.trigger,
+    });
+    job.resolve({ replyText: '', ok: false });
+    drainReactionQueue();
+    // try/catch, not just .catch() on the returned promise — interrupt()
+    // isn't guaranteed to exist as a real function on every Query-shaped
+    // value this gets called with (confirmed in the test harness's fake
+    // generator), and this runs inside a bare setTimeout callback where a
+    // synchronous throw would be a genuine unhandled exception.
+    try {
+      void queryHandle?.interrupt().catch((err) => log.error('control_turn_interrupt_failed', err, { person: cfg.slug }));
+    } catch (err) {
+      log.error('control_turn_interrupt_failed', err, { person: cfg.slug });
+    }
+  }
+
   async function submitTurn(turn: TurnRequest, turnId: string): Promise<TurnResult> {
     const promptText = buildPrompt(turn);
     const { text: userText, bytes: userBytes } = truncateText(promptText);
     log.line('user', { person: cfg.slug, turn: turnId, text: userText, bytes: userBytes });
     const message = await buildUserMessage(cfg, turn, promptText);
-    return startJob('http', turnId, message);
+    const resultPromise = startJob('http', turnId, message);
+    if (turn.kind !== 'control') return resultPromise;
+    const timer = setTimeout(() => timeoutControlTurn(turnId), controlTurnTimeoutMs);
+    try {
+      return await resultPromise;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function finishCurrentJob(): void {
@@ -186,16 +234,21 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
   async function runAutoCompact(totalSoFar: number): Promise<void> {
     const turnId = `auto-compact:${Date.now()}`;
     const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: '/compact' }, parent_tool_use_id: null };
+    const timer = setTimeout(() => timeoutControlTurn(turnId), controlTurnTimeoutMs);
     try {
       const result = await startJob('auto_compact', turnId, message);
       log.line('auto_compact_triggered', { person: cfg.slug, totalSoFar, contextLimit, ok: result.ok });
       await sendTelegramReply(
         cfg.telegramBotToken,
         cfg.chatId,
-        `Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`,
+        result.ok
+          ? `✅ Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`
+          : `⚠️ Auto-compact timed out — context is still over your ${contextLimit.toLocaleString()}-token limit, will retry after your next message.`,
       );
     } catch (err) {
       log.error('auto_compact_failed', err, { person: cfg.slug });
+    } finally {
+      clearTimeout(timer);
     }
   }
 

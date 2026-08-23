@@ -296,6 +296,14 @@ async function handleForgetSkill(
  * same `/turn` delivery path (journal dedup, busy/retry) specifically to
  * avoid that prefix, not through `enqueueChatMessage`.
  */
+/**
+ * Immediate ack before the real (possibly slow) work starts — confirmed
+ * live 2026-08-23 a manual /compact can run well past a minute with zero
+ * visible progress otherwise, which is exactly what read as "does nothing."
+ * The actual result (success/timeout) follows later as its own message from
+ * the runner once `session-controller.ts`'s control turn resolves — this
+ * function doesn't wait for that, it only confirms the command was received.
+ */
 async function handleControlTurn(
   deps: RouterDeps,
   slug: string,
@@ -303,6 +311,10 @@ async function handleControlTurn(
   command: '/compact' | '/clear',
   updateId: number,
 ): Promise<void> {
+  await deps.telegram.sendMessage(
+    person.chatId,
+    command === '/compact' ? '🔄 Compacting your conversation — can take a minute or two...' : '🧹 Clearing...',
+  );
   const delivered = await sendTurnWithRetry(
     deps.api,
     deps.cfg,
@@ -311,10 +323,13 @@ async function handleControlTurn(
     person.tz,
     person.tasksToken,
     { kind: 'control', updateId, chatId: person.chatId, command },
-    60_000,
+    // A bit above session-controller.ts's own 180s control-turn timeout, so
+    // delivery retries don't give up right before the runner would have
+    // recovered on its own.
+    200_000,
   );
   if (!delivered) {
-    await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
+    await deps.telegram.sendMessage(person.chatId, "⚠️ Couldn't reach your session right now — try again in a moment.");
   }
 }
 
