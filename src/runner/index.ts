@@ -2,6 +2,16 @@
  * Runner entrypoint (architecture doc section 3): HTTP server on :8080,
  * `POST /turn` + `GET /healthz`. One turn at a time — a `/turn` while busy
  * returns 409 and the operator holds + retries.
+ *
+ * The session itself is persistent (`session-controller.ts`) — one SDK
+ * `query()` spans the pod's whole lifetime instead of one per turn, so
+ * backgrounded work has somewhere to land. This file's own `busy` flag is
+ * still what gates concurrent `/turn`s, though: it's set synchronously
+ * before any `await`, so two requests racing in before either has finished
+ * body-parsing/journal-lookup can never both reach `submitTurn` at once —
+ * `controller.isBusy()` alone can't provide that guarantee, since it only
+ * flips once a message actually reaches the queue, which is after those
+ * async steps.
  */
 import { execFile } from 'node:child_process';
 import { copyFile, mkdir } from 'node:fs/promises';
@@ -14,7 +24,7 @@ import { log } from '../shared/log.js';
 import type { TurnRequest } from '../shared/types.js';
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
-import { runTurn } from './sdk-session.js';
+import { createSessionController } from './session-controller.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
@@ -58,6 +68,9 @@ async function main(): Promise<void> {
   await ensureGitIdentity();
   await installPersonaFiles(cfg);
 
+  const controller = createSessionController(cfg);
+  await controller.start();
+
   let busy = false;
 
   const incomplete = await journal.listIncomplete();
@@ -90,7 +103,7 @@ async function main(): Promise<void> {
       sendJson(res, 202, { accepted: true });
 
       try {
-        const result = await runTurn(cfg, turn, key);
+        const result = await controller.submitTurn(turn, key);
         if (result.replyText) {
           await sendTelegramReply(cfg.telegramBotToken, turn.chatId, result.replyText);
         }
@@ -124,7 +137,9 @@ async function main(): Promise<void> {
 
   const shutdown = (): void => {
     log.line('runner_shutting_down', { person: cfg.slug });
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void controller.stop().finally(() => process.exit(0));
+    });
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

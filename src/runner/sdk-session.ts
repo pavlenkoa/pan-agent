@@ -1,12 +1,14 @@
 /**
- * One SDK query() per turn against the persistent, resumed session
- * (architecture doc section 3). Streams every message to stdout as
- * structured JSON (section 7) and returns the final reply text for the
- * runner to send via Telegram directly.
+ * Prompt-building and query-options helpers for the persistent per-person
+ * session (architecture doc section 3): one SDK `query()` call spans the
+ * whole pod's lifetime, not one per turn — see `session-controller.ts` for
+ * the actual long-lived stream/single-flight logic. This module stays pure:
+ * turning a `TurnRequest` into the message pushed onto that stream, and the
+ * one-time query options built once at session start.
  */
 import { readFile, writeFile } from 'node:fs/promises';
 
-import { query, type CanUseTool, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
 import type { TurnRequest } from '../shared/types.js';
@@ -25,7 +27,7 @@ interface LooseContentBlock {
   is_error?: boolean;
 }
 
-async function readSavedSessionId(cfg: RunnerConfig): Promise<string | null> {
+export async function readSavedSessionId(cfg: RunnerConfig): Promise<string | null> {
   try {
     const raw = await readFile(cfg.sessionIdFile, 'utf8');
     return raw.trim() || null;
@@ -35,11 +37,11 @@ async function readSavedSessionId(cfg: RunnerConfig): Promise<string | null> {
   }
 }
 
-async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promise<void> {
+export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promise<void> {
   await writeFile(cfg.sessionIdFile, sessionId, 'utf8');
 }
 
-function buildPrompt(turn: TurnRequest): string {
+export function buildPrompt(turn: TurnRequest): string {
   if (turn.kind === 'task') {
     return `[Scheduled task ${turn.taskId}, due ${turn.scheduledFor}]\n${turn.prompt}`;
   }
@@ -47,56 +49,28 @@ function buildPrompt(turn: TurnRequest): string {
 }
 
 /**
- * Chat turns with attachments need the SDK's streaming-input form (a single
- * yielded SDKUserMessage) so a photo can go in as real vision content, not
- * just its text form. Everything else keeps the plain string prompt.
+ * One message pushed onto the persistent stream per turn. Chat turns with a
+ * photo attachment get it inlined as real vision content; documents were
+ * already saved to the workspace by `resolveAttachments` and are referenced
+ * by path in the text instead.
  */
-async function buildPromptInput(
+export async function buildUserMessage(
   cfg: RunnerConfig,
   turn: TurnRequest,
   promptText: string,
-): Promise<string | AsyncIterable<SDKUserMessage>> {
-  if (turn.kind !== 'chat') return promptText;
-  const attachments = turn.messages.flatMap((m) => m.attachments ?? []);
-  if (attachments.length === 0) return promptText;
+): Promise<SDKUserMessage> {
+  const attachments = turn.kind === 'chat' ? turn.messages.flatMap((m) => m.attachments ?? []) : [];
+  if (attachments.length === 0) {
+    return { type: 'user', message: { role: 'user', content: promptText }, parent_tool_use_id: null };
+  }
 
   const { images, notes } = await resolveAttachments(cfg, attachments);
   const fullText = notes.length > 0 ? `${promptText}\n${notes.join('\n')}` : promptText;
-
-  async function* single(): AsyncGenerator<SDKUserMessage> {
-    yield {
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: fullText }, ...images] },
-      parent_tool_use_id: null,
-    };
-  }
-  return single();
-}
-
-/**
- * The SDK's Bash tool supports `run_in_background`, but this runner spins
- * up a fresh `query()` per /turn — when the turn ends the whole session
- * process (and any backgrounded command + its completion notification) dies
- * with it. Deny it up front so the model gets a live error and falls back
- * to a synchronous wait (Bash `timeout`, up to 10min) or `schedule_task` for
- * anything longer, instead of silently losing the follow-up.
- */
-const denyBackgroundedBash: CanUseTool = async (toolName, input) => {
-  if (toolName === 'Bash' && input['run_in_background'] === true) {
-    return {
-      behavior: 'deny',
-      message:
-        'Backgrounded bash does not work in this environment — the turn ends and the background process (and any ' +
-        'notification about it) is killed with it. Re-run the command in the foreground (add a `timeout` up to ' +
-        '600000ms if it needs to wait), or use schedule_task if you genuinely need to check back later.',
-    };
-  }
-  return { behavior: 'allow', updatedInput: input };
-};
-
-export interface TurnResult {
-  replyText: string;
-  ok: boolean;
+  return {
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: fullText }, ...images] },
+    parent_tool_use_id: null,
+  };
 }
 
 const SCHEDULING_TOOLS = [
@@ -107,83 +81,57 @@ const SCHEDULING_TOOLS = [
 
 const ATTACHMENT_TOOLS = ['mcp__pan-agent-attachments__send_file'];
 
-export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: string): Promise<TurnResult> {
-  const promptText = buildPrompt(turn);
-  const prompt = await buildPromptInput(cfg, turn, promptText);
-  const sessionId = await readSavedSessionId(cfg);
+/**
+ * `allowedTools` only auto-approves listed tools without a permission
+ * prompt — it does NOT restrict which built-in tools exist. Without `tools`
+ * set, the SDK's full native Claude Code toolset (CronCreate, ScheduleWakeup,
+ * Monitor, TaskCreate/Output/Stop, Artifact, ...) stays available regardless
+ * of what's listed here, and a model that knows those tools from elsewhere
+ * will reach for them — confirmed live: it called `CronCreate` directly
+ * (bypassing `schedule_task` entirely, despite the persona explicitly
+ * forbidding it), and the "fire" was real but nothing about that tool is
+ * wired to this runner's Telegram delivery, so the message never arrived.
+ * `tools` is the actual allowlist; everything not named here is unavailable.
+ * `CronCreate` stays excluded permanently even now that sessions are
+ * persistent — it's session-only/non-durable with a 7-day hard expiry
+ * (confirmed from the tool's own spec), strictly worse than `schedule_task`
+ * regardless of process lifetime.
+ */
+const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
 
-  log.line('turn_start', { person: cfg.slug, session: sessionId, turn: turnId, kind: turn.kind });
-  const { text: userText, bytes: userBytes } = truncateText(promptText);
-  log.line('user', { person: cfg.slug, turn: turnId, text: userText, bytes: userBytes });
-
-  const startedAt = Date.now();
-  const stream = query({
-    prompt,
-    options: {
-      cwd: cfg.workspaceCwd,
-      ...(sessionId ? { resume: sessionId } : {}),
-      permissionMode: 'acceptEdits',
-      canUseTool: denyBackgroundedBash,
-      mcpServers: {
-        'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
-        'pan-agent-attachments': buildAttachmentMcpServer(cfg),
-      },
-      allowedTools: [
-        'Bash',
-        'Read',
-        'Write',
-        'Edit',
-        'Glob',
-        'Grep',
-        'WebFetch',
-        'WebSearch',
-        ...SCHEDULING_TOOLS,
-        ...ATTACHMENT_TOOLS,
-      ],
+/**
+ * One-time query options, built once at session-controller start. Backgrounded
+ * Bash is intentionally left ungated here (no `canUseTool` denial) — the whole
+ * point of the persistent session is that `run_in_background` now actually
+ * works: its `task_notification` lands on this same long-lived stream instead
+ * of vanishing with a per-turn process.
+ */
+export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): Options {
+  return {
+    cwd: cfg.workspaceCwd,
+    ...(sessionId ? { resume: sessionId } : {}),
+    permissionMode: 'acceptEdits',
+    tools: BUILTIN_TOOLS,
+    mcpServers: {
+      'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
+      'pan-agent-attachments': buildAttachmentMcpServer(cfg),
     },
-  });
-
-  let replyText = '';
-  let ok = true;
-  let newSessionId: string | null = null;
-  let numTurns = 0;
-  let costUsd = 0;
-  let usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; contextWindow: number } | null =
-    null;
-
-  try {
-    for await (const message of stream as AsyncIterable<SDKMessage & { session_id?: string }>) {
-      if (message.session_id) newSessionId = message.session_id;
-      logSdkMessage(cfg.slug, turnId, message);
-      if (message.type === 'result') {
-        ok = !message.is_error;
-        numTurns = message.num_turns;
-        costUsd = message.total_cost_usd;
-        if (message.subtype === 'success') replyText = message.result;
-        usage = summarizeUsage(message.modelUsage);
-      }
-    }
-  } catch (err) {
-    ok = false;
-    log.error('turn_error', err, { person: cfg.slug, turn: turnId });
-  }
-
-  if (newSessionId && newSessionId !== sessionId) await saveSessionId(cfg, newSessionId);
-
-  log.line('turn_end', {
-    person: cfg.slug,
-    turn: turnId,
-    ok,
-    dur_ms: Date.now() - startedAt,
-    cost_usd: costUsd,
-    turns: numTurns,
-    ...usage,
-  });
-
-  return { replyText, ok };
+    allowedTools: [
+      'Bash',
+      'Read',
+      'Write',
+      'Edit',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'WebSearch',
+      ...SCHEDULING_TOOLS,
+      ...ATTACHMENT_TOOLS,
+    ],
+  };
 }
 
-interface ModelUsageLike {
+export interface ModelUsageLike {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens: number;
@@ -191,7 +139,7 @@ interface ModelUsageLike {
 }
 
 /** Sums token usage across every model used this turn (normally just one) — surfaces context growth in Loki without needing to trust auto-compaction blindly. */
-function summarizeUsage(
+export function summarizeUsage(
   modelUsage: Record<string, ModelUsageLike> | undefined,
 ): { inputTokens: number; outputTokens: number; cacheReadTokens: number; contextWindow: number } | null {
   const entries = Object.values(modelUsage ?? {});
@@ -207,7 +155,7 @@ function summarizeUsage(
   );
 }
 
-function logSdkMessage(person: string, turnId: string, message: SDKMessage): void {
+export function logSdkMessage(person: string, turnId: string, message: SDKMessage): void {
   if (message.type === 'system' && message.subtype === 'compact_boundary') {
     const { trigger, pre_tokens, post_tokens } = message.compact_metadata;
     log.line('compact_boundary', { person, turn: turnId, trigger, preTokens: pre_tokens, postTokens: post_tokens });
