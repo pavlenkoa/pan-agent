@@ -9,7 +9,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
 import type { TurnRequest } from '../shared/types.js';
@@ -109,10 +109,13 @@ const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetc
 
 /**
  * One-time query options, built once at session-controller start. Backgrounded
- * Bash is intentionally left ungated here (no `canUseTool` denial) — the whole
- * point of the persistent session is that `run_in_background` now actually
- * works: its `task_notification` lands on this same long-lived stream instead
- * of vanishing with a per-turn process.
+ * Bash itself is intentionally left ungated (no denial for it specifically in
+ * `buildSkillsCanUseTool` below) — the whole point of the persistent session
+ * is that `run_in_background` now actually works: its `task_notification`
+ * lands on this same long-lived stream instead of vanishing with a per-turn
+ * process. The `canUseTool` this builds is only ever consulted for the one
+ * case bare `tools`/`allowedTools` entries don't already auto-approve (see
+ * `buildSkillsCanUseTool`'s comment) — ordinary Bash calls never reach it.
  */
 /**
  * Subdirectory name under claudeHome for the SDK's native auto-memory store
@@ -125,6 +128,45 @@ const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetc
  * pinning it changes nothing about persistence — just the path shape.
  */
 export const MEMORY_DIR_NAME = 'memory';
+
+/**
+ * Claude Code treats `.claude/skills/` (like `hooks/`, `commands/`,
+ * `settings*`) as a protected "customization surface" — confirmed live that
+ * a `Write`/`Edit`/`Bash` call targeting it is denied unconditionally, even
+ * under `permissionMode: 'acceptEdits'` and even with an explicit
+ * `settings.permissions.allow` rule for it. Neither bypasses this; only a
+ * `canUseTool` callback can. Without one, a person asking the model to
+ * "create a skill for X" gets permanently stuck — the model's tool call
+ * fails with "you haven't granted it yet" and there is no dialog, no
+ * button, nowhere in this headless Telegram bot for a human to grant it.
+ * This callback is the fix: allow exactly `Write`/`Edit` into this person's
+ * own `<workspaceCwd>/.claude/skills/`, and (since Claude Code separately
+ * surfaces the same block for `Bash` via `options.blockedPath`, or with no
+ * `blockedPath` at all for a compound/redirected command) also allow a
+ * `Bash` call whose reported blocked path — or, failing that, whose literal
+ * command text — targets that same directory. Confirmed live this callback
+ * is *only* ever invoked for calls the bare `tools`/`allowedTools` entries
+ * don't already auto-approve (the SDK's own `CAN_USE_TOOL_SHADOWED` warning
+ * describes this) — so this is additive: it cannot loosen anything for a
+ * tool call that already succeeds today.
+ */
+function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
+  const skillsDir = path.join(cfg.workspaceCwd, '.claude', 'skills');
+  const isSkillsPath = (p: string | undefined): boolean =>
+    !!p && (path.resolve(p) === skillsDir || path.resolve(p).startsWith(skillsDir + path.sep));
+
+  return async (toolName, input, options) => {
+    const filePath = typeof input['file_path'] === 'string' ? (input['file_path'] as string) : undefined;
+    const command = typeof input['command'] === 'string' ? (input['command'] as string) : undefined;
+    const targetsSkillsDir =
+      isSkillsPath(filePath) || isSkillsPath(options.blockedPath) || (command?.includes('.claude/skills') ?? false);
+
+    if (targetsSkillsDir) {
+      return { behavior: 'allow', updatedInput: input };
+    }
+    return { behavior: 'deny', message: `pan-agent: unexpected permission request for ${toolName} outside the auto-approved surface` };
+  };
+}
 
 export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): Options {
   return {
@@ -151,6 +193,7 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
     // (skills show up in system/init's `skills` list either way) — it's
     // `'Skill'` in `tools` above that actually gates invocation.
     skills: 'all',
+    canUseTool: buildSkillsCanUseTool(cfg),
     mcpServers: {
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),

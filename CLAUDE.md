@@ -145,6 +145,20 @@ stdout to your log backend picks it up like any other pod.
   `tools`, but is silently uninvokable unless `'Skill'` is also in `tools` —
   confirmed live against the installed SDK before relying on either
   behavior.
+- **`.claude/skills/` (and `hooks/`/`commands/`/`settings*`) is a protected
+  surface even under `permissionMode: 'acceptEdits'`.** A `Write`/`Edit`/
+  `Bash` call targeting it is denied unconditionally — neither `acceptEdits`
+  nor an explicit `settings.permissions.allow` rule for it bypasses this
+  (confirmed live: both tried, both still denied). This first showed up as a
+  real stuck turn in production: the model tried to create a person's skill,
+  got "you haven't granted it yet," and there was no dialog anywhere in this
+  headless Telegram bot for a human to grant it. The only bypass is a
+  `canUseTool` callback (`buildSkillsCanUseTool` in `runner/sdk-session.ts`)
+  that explicitly allows `Write`/`Edit`/`Bash` into that one directory.
+  Confirmed live this callback is *only* ever invoked for calls the bare
+  `tools`/`allowedTools` entries don't already auto-approve (the SDK's own
+  `CAN_USE_TOOL_SHADOWED` warning says as much) — so adding it is additive,
+  it can't loosen anything that already worked.
 - **Check for a native SDK feature before building one.** Before adding
   bespoke persistent-memory plumbing, checking the *installed*
   `@anthropic-ai/claude-agent-sdk` package's own type definitions
