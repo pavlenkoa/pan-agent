@@ -14,7 +14,7 @@
  * async steps.
  */
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -54,6 +54,9 @@ Set via /set_var by the person you're assisting — already present in your Bash
 ${lines.join('\n')}`;
 }
 
+/** Every `SKILL-<name>.md` key in the persona ConfigMap becomes a shared skill `<name>`, installed for every person. Matches `SHARED_SKILL_NAMES` in `operator/nfs.ts` — a name added here must be added there too, or `/skills` will misreport it as person-authored and `/forget_skill` will delete it (it'll just come back on next boot, but the listing will lie in the meantime). */
+const SHARED_SKILL_FILE_PATTERN = /^SKILL-(.+)\.md$/;
+
 /**
  * The pan-agent-persona ConfigMap is mounted read-only at /config — that's
  * not a path the Claude Agent SDK's CLAUDE.md/skill auto-discovery ever
@@ -70,10 +73,20 @@ async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
   try {
     const sharedPersona = await readFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), 'utf8');
     await writeFile(path.join(cfg.claudeHome, 'CLAUDE.md'), sharedPersona + renderCustomVarsSection(cfg));
-    const mediaSkillDir = path.join(cfg.workspaceCwd, '.claude', 'skills', 'media');
-    await mkdir(mediaSkillDir, { recursive: true });
-    await copyFile(path.join(PERSONA_MOUNT_DIR, 'SKILL.md'), path.join(mediaSkillDir, 'SKILL.md'));
-    log.line('persona_installed', { person: cfg.slug, customVars: cfg.customVarsDoc.length });
+
+    const entries = await readdir(PERSONA_MOUNT_DIR);
+    const skillNames: string[] = [];
+    for (const entry of entries) {
+      const match = entry.match(SHARED_SKILL_FILE_PATTERN);
+      const skillName = match?.[1];
+      if (!skillName) continue;
+      const skillDir = path.join(cfg.workspaceCwd, '.claude', 'skills', skillName);
+      await mkdir(skillDir, { recursive: true });
+      await copyFile(path.join(PERSONA_MOUNT_DIR, entry), path.join(skillDir, 'SKILL.md'));
+      skillNames.push(skillName);
+    }
+
+    log.line('persona_installed', { person: cfg.slug, customVars: cfg.customVarsDoc.length, sharedSkills: skillNames });
   } catch (err) {
     log.error('persona_install_failed', err, { person: cfg.slug });
   }

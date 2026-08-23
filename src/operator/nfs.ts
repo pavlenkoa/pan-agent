@@ -86,13 +86,14 @@ export async function deleteMemoryFile(slug: string, name: string): Promise<bool
 // ---------------------------------------------------------------------------
 // Skills (/skills, /forget_skill) — person-authored .claude/skills/<name>/
 // under the person's *workspace* (not claudeHome — same directory the SDK's
-// native Skill discovery scans, and where the shared `media` skill already
-// lives). `media` is the shared skill (reinstalled on every boot by
-// installPersonaFiles) and is deliberately excluded/unremovable here — it
-// isn't this person's own state.
+// native Skill discovery scans, and where the shared skills already live).
+// Shared skills (one per `SKILL-<name>.md` key in the persona ConfigMap,
+// reinstalled on every boot by runner/index.ts's installPersonaFiles) are
+// deliberately excluded/unremovable here — they aren't this person's own
+// state. Keep this set in sync with the ConfigMap's `SKILL-*.md` keys.
 // ---------------------------------------------------------------------------
 
-const SHARED_SKILL_NAME = 'media';
+const SHARED_SKILL_NAMES = new Set(['media', 'esputnik-query']);
 
 function personSkillsDir(slug: string): string {
   return path.join(NFS_MOUNT_PATH, 'people', slug, 'workspace', '.claude', 'skills');
@@ -116,7 +117,7 @@ function parseSkillFrontmatter(content: string): { name?: string; description?: 
   return result;
 }
 
-/** Person-authored skills only — excludes the shared `media` skill, same framing as listMemoryFiles only ever showing this person's own state. */
+/** Person-authored skills only — excludes shared skills, same framing as listMemoryFiles only ever showing this person's own state. */
 export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
   let entries: string[];
   try {
@@ -127,7 +128,7 @@ export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
   }
   const skills = await Promise.all(
     entries
-      .filter((name) => name !== SHARED_SKILL_NAME)
+      .filter((name) => !SHARED_SKILL_NAMES.has(name))
       .map(async (name) => {
         const skillMdPath = path.join(personSkillsDir(slug), name, 'SKILL.md');
         let content: string;
@@ -146,9 +147,9 @@ export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
   return skills.filter((s): s is SkillInfo => s !== null).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Recursively deletes one person-authored skill by directory name. Only ever deletes a name that showed up in listPersonSkills — no path traversal surface, and the shared `media` skill can never be targeted this way. */
+/** Recursively deletes one person-authored skill by directory name. Only ever deletes a name that showed up in listPersonSkills — no path traversal surface, and a shared skill can never be targeted this way. */
 export async function deletePersonSkill(slug: string, name: string): Promise<boolean> {
-  if (name === SHARED_SKILL_NAME) return false;
+  if (SHARED_SKILL_NAMES.has(name)) return false;
   const skills = await listPersonSkills(slug);
   if (!skills.some((s) => s.name === name)) return false;
   await rm(path.join(personSkillsDir(slug), name), { recursive: true, force: true });

@@ -249,7 +249,10 @@ data:
     ## Media Skill
     For media operations, read `.claude/skills/media/SKILL.md` in the workspace.
 
-  SKILL.md: |
+    ## eSputnik
+    Only if the person explicitly asks about their eSputnik account (email marketing platform) — read `.claude/skills/esputnik-query/SKILL.md` in the workspace for credential setup and read-only query recipes. Do not proactively check, mention, or use this unless asked directly — unlike the media skill above, there is no MANDATORY trigger for it.
+
+  SKILL-media.md: |
     # Media Management Skill
 
     Core rules (library layout, release selection, tracker search order) are in CLAUDE.md — always loaded.
@@ -431,3 +434,94 @@ data:
     2. Login to Toloka, check if torrent size changed
     3. If changed → download new .torrent, remove old from Transmission (keep files!), add new
     4. Notify, refresh Emby
+
+  SKILL-esputnik-query.md: |
+    # eSputnik Query Skill
+
+    Read-only ad-hoc queries against an eSputnik email-marketing account — segment/group
+    lookups, contact info, per-contact message history. Account-agnostic: credentials come
+    from env vars, never hardcoded. Only ever use this when the person explicitly asks
+    about their eSputnik account — never proactively.
+
+    **Strictly read-only: every recipe below is a `GET`. Never call a `POST`/`PUT`/`DELETE`
+    eSputnik endpoint from this skill.** Editing templates, workflows, segments, or contact
+    fields is out of scope — say so and stop if asked, don't attempt it.
+
+    ## Auth
+
+    Check which of these env vars exist for the account before making any call, preferring
+    the token if both are set. `<ACCOUNT>` is a short uppercase label the person picks per
+    eSputnik account (e.g. `ACME`) — everything else below is account-agnostic.
+
+    - **Preferred (API key, needs 2FA enabled on the eSputnik account first):**
+      `ESPUTNIK_TOKEN_<ACCOUNT>` — use as `curl -u "api:$ESPUTNIK_TOKEN_<ACCOUNT>" ...`
+      (username is an arbitrary placeholder, ignored server-side).
+    - **Interim (no 2FA yet on the account):** `ESPUTNIK_EMAIL_<ACCOUNT>` and
+      `ESPUTNIK_PASSWORD_<ACCOUNT>` — use as
+      `curl -u "$ESPUTNIK_EMAIL_<ACCOUNT>:$ESPUTNIK_PASSWORD_<ACCOUNT>" ...`. Confirmed live:
+      `https://esputnik.com` accepts real account email+password as HTTP Basic Auth
+      directly, same as an API-key credential.
+
+    If neither pair is set for the account the person mentions, tell them what to run — they
+    run `/set_var` themselves, you never see the value:
+    ```
+    /set_var ESPUTNIK_EMAIL_<ACCOUNT> <their eSputnik login email>
+    /set_var ESPUTNIK_PASSWORD_<ACCOUNT> <their eSputnik login password>
+    ```
+
+    Base URL for every call: `https://esputnik.com`.
+
+    ## Sanity check (run once after credentials are set)
+    ```bash
+    curl -s -u "$ESPUTNIK_EMAIL_<ACCOUNT>:$ESPUTNIK_PASSWORD_<ACCOUNT>" "https://esputnik.com/api/v1/groups"
+    ```
+    200 with a JSON array of `{id, name, type}` = working. `401` = bad credential. If it
+    fails, show the person the actual HTTP status and response body — don't guess why.
+
+    ## List segments/groups
+    ```bash
+    curl -s -u "..." "https://esputnik.com/api/v1/groups"
+    # -> [{"id": 201744993, "name": "Errors", "type": "STATIC"}, ...]
+    ```
+    `type` is `STATIC`, `DYNAMIC`, or `COMBINED` — casing is inconsistent in real responses
+    (seen `STATIC`, `Static`, and `static` on the same account), don't rely on exact case.
+
+    ## List a group's members
+    ```bash
+    curl -s -u "..." "https://esputnik.com/api/v1/group/<GROUP_ID>/contacts?startindex=1&maxrows=500"
+    ```
+    Returns an array of contact objects — `id`, `channels` (`[{type: "email", value: "..."}]`),
+    `groups` (every other segment that contact also belongs to), `languageCode`, sometimes
+    `firstName`/`timeZone`/`ordersInfo`. `startindex` is **1-based**, capped at
+    `maxrows<=500` per page — page with `startindex += 500` for bigger groups.
+
+    ## Look up one contact by ID
+    ```bash
+    curl -s -u "..." "https://esputnik.com/api/v1/contact/<CONTACT_ID>"
+    ```
+    Same shape as one entry from the group-members call. **No delivery-status, bounce, or
+    blacklist field exists on this object** — don't expect one. Whether a contact is
+    blacklisted has no API answer at all (UI-only) — say so rather than guessing from
+    absence of data.
+
+    ## A contact's message history ("did X get sent Y")
+    Requires one identifier: `email`, `phone`, `contactId`, or `externalCustomerId`.
+    ```bash
+    curl -s -u "..." "https://esputnik.com/api/v2/contacts/messages?email=<EMAIL>&dateFrom=<YYYY-MM-DD>&dateTo=<YYYY-MM-DD>&channelTypes=email&maxrows=100"
+    ```
+    Array of `{contactId, email, messageId, messageInstanceId, messageTags, channelType,
+    sentDateTime, activityStatus, from, subject, ...}`. `activityStatus` is one of
+    `DELIVERED`, `UNDELIVERED`, `READ`, `CLICKED`, `UNSUBSCRIBED`, `SUBSCRIPTION_CHANGED`,
+    `SPAM` — **no failure-reason field on this endpoint**. `dateFrom` cannot be older than 1
+    year (`400 dateFrom mustn't be older than a year`). `offset` here is **0-based**
+    pagination — unlike `group/{id}/contacts`'s 1-based `startindex` above; don't assume
+    the two endpoints' pagination matches.
+
+    ## What this skill will not answer
+    - "Why did this bounce" / "show me all failures this week" — no reason field and no
+      account-wide sweep exists without `ContactActivity` enabled for the account
+      (support-ticket gated, blocked as of 2026-08-23). Say plainly that this needs the
+      eSputnik support ticket, don't fabricate an answer from a partial contact list.
+    - Aggregate campaign stats (opens/clicks totals, revenue) — no REST endpoint found;
+      only exists via the MCP-only, T-1-lagged `get_messaging_analytics`, unverified.
+    - Any write: editing a template, workflow, segment membership, or contact field.
