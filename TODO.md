@@ -188,9 +188,10 @@ recreates any active person missing a pod) to pick it up. Confirmed
 `Running 1/1` on the new image with clean boot logs.
 
 **Not yet done:**
-- [ ] Not tested live: attachment round-trip (send a photo, ask the bot to
-      describe it; ask it to send a file back) and the backgrounded-bash
-      denial actually surfacing as a message the model reacts to correctly.
+- [x] Attachment round-trip live-verified: sent a photo, asked the bot to
+      describe it — described correctly. Sent files back (`send_file`)
+      including a multi-file album (see the 2026-08-23 "multi-file sends"
+      session below) — confirmed working live.
 - [ ] Documents/images arriving via `document` (not `photo`) never get vision
       treatment even if they're actually images — only Telegram's `photo`
       field does. Fine for now; `Read` can still open an image file from
@@ -379,10 +380,10 @@ this is genuinely new concurrency-control logic with no prior coverage,
 unlike the old `runTurn` which was a thin pass-through to the live SDK).
 
 **Not yet done:**
-- [ ] Not deployed/verified live yet — same live-test plan as before applies
-      (ask for a background check, confirm a proactive message arrives;
-      confirm `CronCreate` is still genuinely unavailable; confirm two
-      Telegram messages racing in still gets a clean 409+retry).
+- [x] Deployed and live-verified: asked for a background check ("check
+      torrent peers in a minute and tell me") and a proactive Telegram
+      message arrived on its own, without another message from the user —
+      confirmed working as designed.
 - [ ] Haven't exercised the crash-and-restart path against the real SDK,
       only against fake `queryFn`s in tests — worth watching
       `session_crashed`/`session_restart_attempt`/`session_restart_exhausted`
@@ -392,6 +393,10 @@ unlike the old `runTurn` which was a thin pass-through to the live SDK).
       limits are currently 512Mi request / 2Gi limit; worth a look at actual
       usage after this has been live a while, at only 2 active people this
       is very unlikely to matter yet.
+- [ ] Haven't specifically re-confirmed `CronCreate` is unreachable since the
+      persistent-session redeploy (it was confirmed excluded by the `tools`
+      allowlist before this change, and that allowlist is unchanged, so this
+      is a low-risk gap — just hasn't been re-tested live after the rewrite).
 
 ### Session 2026-08-23 (cont.): multi-file sends
 
@@ -417,3 +422,19 @@ Typecheck, build, and all 41 existing tests still pass — no new tests added
 for the multipart-construction logic, matching this file's existing
 pattern of not unit-testing the thin Telegram-API-wrapper functions
 (`sendTelegramDocument`/`sendTelegramPhoto` were never tested either).
+
+Deployed and live-verified: asked for two files again, both arrived
+grouped in one Telegram album message instead of a zip.
+
+## Backlog
+
+- [ ] **Security review of the whole system** — hasn't had one beyond the
+      two issues found and fixed ad hoc during earlier sessions (the
+      `/tasks` API cross-slug authorization gap, and the operator's Cilium
+      egress policy). Worth a deliberate pass once the current round of
+      feature work settles down — credential/token handling (shared OAuth +
+      bot token, `PERSON_TASKS_TOKEN`), the attachment path-allowlist logic
+      in `attachment-tools.ts`/`attachments.ts`, MCP tool surface exposed to
+      each person's pod, and NFS-mounted workspace isolation between people
+      would all be worth a close look. Not urgent, no known live issue —
+      just hasn't been done yet.
