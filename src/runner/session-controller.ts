@@ -15,7 +15,7 @@
 import { query as sdkQuery, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
+import { DEFAULT_CONTEXT_LIMIT, type ContextUsageSummary, type EffortLevel, type TurnRequest } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
   buildPrompt,
@@ -44,6 +44,8 @@ export interface SessionController {
   getContextUsage(): Promise<ContextUsageSummary>;
   /** Live control-plane write, not a turn — session-scoped only (confirmed live: not persisted to a settings file, resets to the `buildQueryOptions` default on pod restart). Throws if the session hasn't started yet. */
   setEffortLevel(level: EffortLevel): Promise<void>;
+  /** App-enforced soft cap, not an SDK setting — see `maybeTriggerAutoCompact` below for why. Pure local state, no queryHandle needed, safe to call before the session starts. */
+  setContextLimit(tokens: number): void;
 }
 
 type QueryFn = typeof sdkQuery;
@@ -56,7 +58,7 @@ interface PendingReaction {
 
 interface Job {
   turnId: string;
-  trigger: 'http' | 'task_notification';
+  trigger: 'http' | 'task_notification' | 'auto_compact';
   startedAt: number;
   resolve: (result: TurnResult) => void;
   reject: (err: unknown) => void;
@@ -73,6 +75,7 @@ interface Job {
 // from nanoclaw's MAILBOX_FAILURE_STREAK_EXIT -> process.exit pattern).
 const RESTART_BACKOFFS_MS = [1000, 2000, 4000];
 
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -87,6 +90,10 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
   let stopped = false;
   let consecutiveCrashes = 0;
   let supervisorLoop: Promise<void> | null = null;
+  // Tracked locally rather than read back from the SDK — it exposes no
+  // getter for either (confirmed: no getSettings()-equivalent on Query).
+  let effortLevel: EffortLevel = 'medium';
+  let contextLimit = DEFAULT_CONTEXT_LIMIT;
 
   function isBusy(): boolean {
     return currentJob !== null;
@@ -125,6 +132,7 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
     });
     job.resolve({ replyText: job.replyText, ok: job.ok });
     drainReactionQueue();
+    maybeTriggerAutoCompact(job);
   }
 
   function failCurrentJob(err: unknown): void {
@@ -152,6 +160,42 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
       }
     } catch (err) {
       log.error('task_notification_reaction_failed', err, { person: cfg.slug, taskId: reaction.taskId });
+    }
+  }
+
+  /**
+   * App-enforced ceiling, checked after every job — the SDK's own
+   * `autoCompactThreshold` scales up near the model's full window (see
+   * `DEFAULT_CONTEXT_LIMIT`'s comment), so it never actually protects
+   * against a 250K-scale budget. `cacheReadTokens + inputTokens +
+   * outputTokens` approximates current total context without an extra
+   * `getContextUsage()` round-trip per turn (cacheReadTokens = prior
+   * conversation reused this turn, the other two = what this turn just
+   * added). Skips when `job.trigger === 'auto_compact'` so a compact's own
+   * near-empty result (confirmed live: empty `modelUsage`) can never chain
+   * into another one, and skips when something's already queued so it
+   * never preempts real work.
+   */
+  function maybeTriggerAutoCompact(job: Job): void {
+    if (job.trigger === 'auto_compact' || currentJob || reactionQueue.length > 0) return;
+    const totalSoFar = (job.usage?.cacheReadTokens ?? 0) + (job.usage?.inputTokens ?? 0) + (job.usage?.outputTokens ?? 0);
+    if (totalSoFar <= contextLimit) return;
+    void runAutoCompact(totalSoFar);
+  }
+
+  async function runAutoCompact(totalSoFar: number): Promise<void> {
+    const turnId = `auto-compact:${Date.now()}`;
+    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: '/compact' }, parent_tool_use_id: null };
+    try {
+      const result = await startJob('auto_compact', turnId, message);
+      log.line('auto_compact_triggered', { person: cfg.slug, totalSoFar, contextLimit, ok: result.ok });
+      await sendTelegramReply(
+        cfg.telegramBotToken,
+        cfg.chatId,
+        `Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`,
+      );
+    } catch (err) {
+      log.error('auto_compact_failed', err, { person: cfg.slug });
     }
   }
 
@@ -243,11 +287,15 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
     submitTurn,
     async getContextUsage(): Promise<ContextUsageSummary> {
       if (!queryHandle) throw new Error('session not started yet');
-      return summarizeContextUsage(await queryHandle.getContextUsage());
+      return summarizeContextUsage(await queryHandle.getContextUsage(), effortLevel, contextLimit);
     },
     async setEffortLevel(level: EffortLevel): Promise<void> {
       if (!queryHandle) throw new Error('session not started yet');
       await queryHandle.applyFlagSettings({ effortLevel: level });
+      effortLevel = level;
+    },
+    setContextLimit(tokens: number): void {
+      contextLimit = tokens;
     },
   };
 }

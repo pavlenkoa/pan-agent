@@ -12,7 +12,7 @@ import path from 'node:path';
 import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { ContextUsageSummary, TurnRequest } from '../shared/types.js';
+import type { ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
@@ -241,20 +241,26 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
   };
 }
 
-/** Narrows the SDK's much larger `getContextUsage()` response (category breakdowns, grid rows, per-tool/skill token costs, ...) down to what a `/context` reply actually needs. */
-export function summarizeContextUsage(usage: {
-  model: string;
-  totalTokens: number;
-  maxTokens: number;
-  autoCompactThreshold?: number;
-  isAutoCompactEnabled: boolean;
-}): ContextUsageSummary {
+/** Narrows the SDK's much larger `getContextUsage()` response (category breakdowns, grid rows, per-tool/skill token costs, ...) down to what a `/context` reply actually needs, plus the two values session-controller.ts tracks itself (the SDK exposes no getter for either). */
+export function summarizeContextUsage(
+  usage: {
+    model: string;
+    totalTokens: number;
+    maxTokens: number;
+    autoCompactThreshold?: number;
+    isAutoCompactEnabled: boolean;
+  },
+  effortLevel: EffortLevel,
+  contextLimit: number,
+): ContextUsageSummary {
   return {
     model: usage.model,
     totalTokens: usage.totalTokens,
     maxTokens: usage.maxTokens,
-    autoCompactThreshold: usage.autoCompactThreshold ?? null,
+    sdkAutoCompactCeiling: usage.autoCompactThreshold ?? null,
     isAutoCompactEnabled: usage.isAutoCompactEnabled,
+    effortLevel,
+    contextLimit,
   };
 }
 

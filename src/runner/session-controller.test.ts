@@ -29,6 +29,29 @@ function resultMessage(text: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
+function resultMessageWithUsage(
+  text: string,
+  usage: { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number },
+): SDKMessage {
+  return {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    num_turns: 1,
+    total_cost_usd: 0,
+    result: text,
+    modelUsage: {
+      'claude-sonnet-5': {
+        inputTokens: usage.inputTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+        contextWindow: 1_000_000,
+      },
+    },
+    session_id: 'sess-1',
+  } as unknown as SDKMessage;
+}
+
 function taskNotification(taskId: string, summary: string): SDKMessage {
   return {
     type: 'system',
@@ -191,6 +214,56 @@ describe('createSessionController', () => {
     fakeEvents.push(resultMessage('ok'));
     await turnPromise;
     expect(controller.isBusy()).toBe(false);
+  });
+
+  it('auto-compacts once usage crosses the configured context limit, and does not chain into a second one', async () => {
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+    controller.setContextLimit(100);
+
+    const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessageWithUsage('hi back', { cacheReadInputTokens: 150 }));
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+
+    // No external submitTurn call here — this job has to start on its own.
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+
+    // Resolve it with a real /compact-shaped result (empty text) but
+    // deliberately high usage, to prove the trigger:'auto_compact' guard
+    // stops it from chaining into a second auto-compact rather than the
+    // numbers just happening to fall under the limit this time.
+    fakeEvents.push(resultMessageWithUsage('', { cacheReadInputTokens: 999 }));
+    await vi.waitFor(() =>
+      expect(sendTelegramReply).toHaveBeenCalledWith(
+        cfg.telegramBotToken,
+        cfg.chatId,
+        'Auto-compacted: context passed your 100-token limit.',
+      ),
+    );
+
+    await flushMicrotasks();
+    expect(controller.isBusy()).toBe(false);
+    expect(sendTelegramReply).toHaveBeenCalledTimes(1); // exactly one auto-compact, not two
+  });
+
+  it('does not auto-compact when usage stays under the configured limit', async () => {
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+    controller.setContextLimit(1_000_000); // default-shaped: far above what this turn uses
+
+    const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessageWithUsage('hi back', { cacheReadInputTokens: 150 }));
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+
+    await flushMicrotasks();
+    expect(controller.isBusy()).toBe(false);
+    expect(sendTelegramReply).not.toHaveBeenCalled();
   });
 
   it('a queryFn that throws rejects the in-flight job instead of hanging', async () => {

@@ -76,19 +76,44 @@ export function turnKey(turn: TurnRequest): string {
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
 
+// Confirmed live 2026-08-23: the SDK's own autoCompactThreshold scales with
+// the model's context window (~96.6% of it observed in production — 934,000
+// of 967,000), not a small conservative default. This is this app's own
+// choice of a much tighter ceiling (session-controller.ts's
+// `maybeTriggerAutoCompact`), enforced independently rather than relying on
+// any SDK setting (`settings.autoCompactWindow` was tried and confirmed to
+// have zero effect on the SDK's own threshold). Shared so person-commands.ts
+// can say what a limit reset reverts to, without duplicating the number.
+export const DEFAULT_CONTEXT_LIMIT = 250_000;
+
 export interface ContextUsageSummary {
   model: string;
   totalTokens: number;
   maxTokens: number;
-  autoCompactThreshold: number | null;
+  /**
+   * The SDK's own internal ceiling — confirmed live 2026-08-23 this is NOT a
+   * fixed conservative default, it scales with `maxTokens` (observed ~96.6%
+   * of it in production: 934,000 of 967,000). It's the model's own
+   * last-resort safety net, not something this app configures or should be
+   * read as "the effective limit" — see `contextLimit` for that.
+   */
+  sdkAutoCompactCeiling: number | null;
   isAutoCompactEnabled: boolean;
+  /** Currently-applied effort level — session-controller's own tracked value (the SDK exposes no getter for this), reset to the `buildQueryOptions` default on pod restart. */
+  effortLevel: EffortLevel;
+  /** App-enforced soft cap (session-controller.ts) — proactively triggers a real `/compact` once total tokens cross this, independent of the SDK's own much-higher internal ceiling. Set via /context_limit. */
+  contextLimit: number;
 }
 
-export type ControlRequest = { action: 'context' } | { action: 'effort'; level: EffortLevel };
+export type ControlRequest =
+  | { action: 'context' }
+  | { action: 'set_effort'; level: EffortLevel }
+  | { action: 'set_context_limit'; tokens: number };
 
 export type ControlResponse =
   | { ok: true; action: 'context'; context: ContextUsageSummary }
-  | { ok: true; action: 'effort' }
+  | { ok: true; action: 'set_effort' }
+  | { ok: true; action: 'set_context_limit' }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------

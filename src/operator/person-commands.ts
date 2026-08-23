@@ -12,7 +12,14 @@
  * the person about their own just-taken action.
  */
 import { log } from '../shared/log.js';
-import type { ChatMessage, ControlRequest, ControlResponse, EffortLevel, PersonIndexEntry } from '../shared/types.js';
+import {
+  DEFAULT_CONTEXT_LIMIT,
+  type ChatMessage,
+  type ControlRequest,
+  type ControlResponse,
+  type EffortLevel,
+  type PersonIndexEntry,
+} from '../shared/types.js';
 import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
 import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills } from './nfs.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
@@ -99,6 +106,9 @@ export async function tryHandlePersonCommand(
       return true;
     case '/effort':
       await handleEffort(deps, slug, person, args);
+      return true;
+    case '/context_limit':
+      await handleContextLimit(deps, slug, person, args);
       return true;
     default:
       return false;
@@ -326,24 +336,37 @@ async function postControl(deps: RouterDeps, slug: string, body: ControlRequest)
   }
 }
 
-async function handleContext(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+/** Fetches the live context-usage snapshot, or sends a "couldn't reach it" reply and returns null. Shared by /context, /effort (no args), /context_limit (no args). */
+async function fetchContext(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+): Promise<Extract<ControlResponse, { action: 'context' }> | null> {
   const result = await postControl(deps, slug, { action: 'context' });
   if (!result) {
     await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
-    return;
+    return null;
   }
   if (!result.ok || result.action !== 'context') {
     await deps.telegram.sendMessage(person.chatId, `Couldn't read context usage: ${!result.ok ? result.error : 'unexpected response'}`);
-    return;
+    return null;
   }
+  return result;
+}
+
+async function handleContext(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const result = await fetchContext(deps, slug, person);
+  if (!result) return;
   const c = result.context;
   const pct = ((c.totalTokens / c.maxTokens) * 100).toFixed(1);
   const lines = [
     `Model: ${c.model}`,
+    `Effort: ${c.effortLevel}`,
     `Context: ${c.totalTokens.toLocaleString()} / ${c.maxTokens.toLocaleString()} tokens (${pct}%)`,
-    c.isAutoCompactEnabled && c.autoCompactThreshold != null
-      ? `Auto-compacts at: ${c.autoCompactThreshold.toLocaleString()} tokens`
-      : 'Auto-compact: disabled for this session',
+    `Your limit: ${c.contextLimit.toLocaleString()} tokens — auto-compacts here (change with /context_limit <n>)`,
+    c.isAutoCompactEnabled && c.sdkAutoCompactCeiling != null
+      ? `(the model's own hard ceiling is ${c.sdkAutoCompactCeiling.toLocaleString()} — should never be reached, your limit above kicks in first)`
+      : '(the model has no ceiling of its own for this session)',
   ];
   await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
 }
@@ -352,11 +375,20 @@ const VALID_EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh'];
 
 async function handleEffort(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
   const [level] = args;
-  if (!level || !VALID_EFFORT_LEVELS.includes(level as EffortLevel)) {
+  if (!level) {
+    const result = await fetchContext(deps, slug, person);
+    if (!result) return;
+    await deps.telegram.sendMessage(
+      person.chatId,
+      `Current effort: ${result.context.effortLevel}. Usage: /effort low|medium|high|xhigh`,
+    );
+    return;
+  }
+  if (!VALID_EFFORT_LEVELS.includes(level as EffortLevel)) {
     await deps.telegram.sendMessage(person.chatId, 'Usage: /effort low|medium|high|xhigh');
     return;
   }
-  const result = await postControl(deps, slug, { action: 'effort', level: level as EffortLevel });
+  const result = await postControl(deps, slug, { action: 'set_effort', level: level as EffortLevel });
   if (!result) {
     await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
     return;
@@ -368,5 +400,42 @@ async function handleEffort(deps: RouterDeps, slug: string, person: PersonIndexE
   await deps.telegram.sendMessage(
     person.chatId,
     `Effort level set to ${level} for this session (resets to medium if your pod restarts).`,
+  );
+}
+
+const MIN_CONTEXT_LIMIT = 10_000;
+const MAX_CONTEXT_LIMIT = 2_000_000;
+
+async function handleContextLimit(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+  const [raw] = args;
+  if (!raw) {
+    const result = await fetchContext(deps, slug, person);
+    if (!result) return;
+    await deps.telegram.sendMessage(
+      person.chatId,
+      `Current limit: ${result.context.contextLimit.toLocaleString()} tokens. Usage: /context_limit <tokens>`,
+    );
+    return;
+  }
+  const tokens = Number(raw);
+  if (!Number.isInteger(tokens) || tokens < MIN_CONTEXT_LIMIT || tokens > MAX_CONTEXT_LIMIT) {
+    await deps.telegram.sendMessage(
+      person.chatId,
+      `Usage: /context_limit <tokens> — an integer between ${MIN_CONTEXT_LIMIT.toLocaleString()} and ${MAX_CONTEXT_LIMIT.toLocaleString()}.`,
+    );
+    return;
+  }
+  const result = await postControl(deps, slug, { action: 'set_context_limit', tokens });
+  if (!result) {
+    await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
+    return;
+  }
+  if (!result.ok) {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't set context limit: ${result.error}`);
+    return;
+  }
+  await deps.telegram.sendMessage(
+    person.chatId,
+    `Context limit set to ${tokens.toLocaleString()} tokens for this session (resets to ${DEFAULT_CONTEXT_LIMIT.toLocaleString()} if your pod restarts).`,
   );
 }

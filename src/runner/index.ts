@@ -171,9 +171,12 @@ async function main(): Promise<void> {
       let response: ControlResponse;
       if (body.action === 'context') {
         response = { ok: true, action: 'context', context: await controller.getContextUsage() };
-      } else {
+      } else if (body.action === 'set_effort') {
         await controller.setEffortLevel(body.level);
-        response = { ok: true, action: 'effort' };
+        response = { ok: true, action: 'set_effort' };
+      } else {
+        controller.setContextLimit(body.tokens);
+        response = { ok: true, action: 'set_context_limit' };
       }
       sendJson(res, 200, response);
     } catch (err) {
