@@ -222,6 +222,11 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
   return {
     async start(): Promise<void> {
       supervisorLoop = runSupervised();
+      // Fire-and-forget background task — attach a safety net immediately so
+      // an unexpected rejection (a bug, or process.exit() itself throwing in
+      // tests) can never surface as an unhandled promise rejection before
+      // stop() gets around to awaiting it.
+      supervisorLoop.catch((err) => log.error('session_supervisor_fatal', err, { person: cfg.slug }));
     },
     async stop(): Promise<void> {
       stopped = true;

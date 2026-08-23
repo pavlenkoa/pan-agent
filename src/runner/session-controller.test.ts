@@ -210,10 +210,24 @@ describe('createSessionController', () => {
     expect(controller.isBusy()).toBe(false);
   });
 
-  it('exhausting the bounded restart budget exits the process instead of retrying forever', async () => {
-    vi.useFakeTimers();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    try {
+  it(
+    'exhausting the bounded restart budget exits the process instead of retrying forever',
+    async () => {
+      // Real timers, not fake ones: advanceTimersByTimeAsync's interaction with
+      // a genuinely-throwing async generator chain proved nondeterministic
+      // across environments (passed locally 5/5, failed in CI) — how many
+      // chained timers it fires per advance() call isn't guaranteed. The
+      // backoffs are only 1s/2s/4s (~7s total), cheap enough to just wait out
+      // for real and get a properly deterministic test instead.
+      //
+      // The mock throws rather than returning: real process.exit() never
+      // returns, so runSupervised's code never falls through past it. A mock
+      // that just returns would let the loop keep retrying forever afterward
+      // (mocked exit "succeeds" but doesn't actually stop anything), leaving
+      // a runaway loop for afterEach's controller.stop() to wait out.
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called (mocked)');
+      });
       const alwaysThrows = vi.fn(() => {
         return (async function* gen(): AsyncGenerator<SDKMessage> {
           throw new Error('always dies');
@@ -224,15 +238,12 @@ describe('createSessionController', () => {
       controller = createSessionController(cfg, alwaysThrows);
       await controller.start();
 
-      // Backoffs are 1s/2s/4s (3 bounded retries) before the exhausted exit.
-      for (let i = 0; i < 5; i++) {
-        await vi.advanceTimersByTimeAsync(4000);
+      try {
+        await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(1), { timeout: 15000, interval: 100 });
+      } finally {
+        exitSpy.mockRestore();
       }
-
-      expect(exitSpy).toHaveBeenCalledWith(1);
-    } finally {
-      exitSpy.mockRestore();
-      vi.useRealTimers();
-    }
-  });
+    },
+    20000,
+  );
 });
