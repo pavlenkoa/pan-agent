@@ -89,10 +89,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Long-poll loop. `onUpdate` must resolve (never reject) once the update has
- * either been durably handed off (runner 202'd) or intentionally dropped
- * (denied sender) — the caller only advances the offset after it returns,
- * so an update is never acked to Telegram until it's been dealt with.
+ * Long-poll loop. `onUpdate` is *expected* to resolve (never reject) once
+ * the update has either been durably handed off (runner 202'd) or
+ * intentionally dropped (denied sender) — but that's not trusted blindly:
+ * a routing-side failure (e.g. a transient k8s API error writing
+ * bookkeeping state) is caught here too, same as a `getUpdates` failure, so
+ * one bad update can't crash this loop or get stuck redelivering forever
+ * (upstream's telegram plugin had a version of this bug where an untrapped
+ * error permanently killed polling while the process stayed alive — ours
+ * differs in shape since `main()` would exit and rely on k8s to restart the
+ * pod, but a poison update would then just crash-loop forever on itself
+ * since no offset is ever persisted across restarts; catching it here
+ * avoids that class of failure entirely).
  */
 export async function pollUpdates(
   client: TelegramClient,
@@ -113,7 +121,11 @@ export async function pollUpdates(
     }
     for (const update of updates) {
       log.line('update_received', { updateId: update.update_id });
-      await onUpdate(update);
+      try {
+        await onUpdate(update);
+      } catch (err) {
+        log.error('update_handling_failed', err, { updateId: update.update_id });
+      }
       offset = update.update_id + 1;
     }
   }
