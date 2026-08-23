@@ -1,10 +1,10 @@
 /**
- * One persistent Agent SDK `query()` per person pod (architecture doc
- * section 3, revised): the underlying `claude` subprocess now spans the
- * pod's whole lifetime instead of being recreated per `/turn`, so a
- * backgrounded Bash command's `task_notification` has somewhere to land —
- * see TODO.md's "persistent sessions" writeup for the full rationale and the
- * `nanocoai/nanoclaw` prior art this design was checked against.
+ * One persistent Agent SDK `query()` per person pod (see CLAUDE.md's
+ * "Session model" section for the full rationale): the underlying `claude`
+ * subprocess now spans the pod's whole lifetime instead of being recreated
+ * per `/turn`, so a backgrounded Bash command's `task_notification` has
+ * somewhere to land. Checked against `nanocoai/nanoclaw`'s prior art for
+ * doing this at the Agent SDK level.
  *
  * Single-flight by construction: only one pushed message is ever outstanding
  * waiting for its `result` at a time, so "the next `result` is the answer to

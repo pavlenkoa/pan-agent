@@ -1,32 +1,21 @@
 # pan-agent
 
-Per-person Claude Code agent host for the homelab: one always-on **operator**
-process that directly creates and manages one long-lived **pod per person**,
-each pod running a **runner** that embeds the Claude Agent SDK. Replaces the
-single-tenant `claude-code` StatefulSet.
+> Built with [Claude Code](https://github.com/anthropics/claude-code)
 
-Full design: see the architecture doc (`docs/architecture.md` in the
-conversation this was built from, or ask for a copy) — this README is just
-the "how to run it" complement.
+A multi-tenant Telegram host for the Claude Agent SDK: one always-on **operator**
+manages one long-lived, isolated **pod per approved person**, each running a
+persistent Claude Code session with its own workspace, memory, and Telegram replies.
 
-## Layout
+See [CLAUDE.md](CLAUDE.md) for architecture, conventions, and everything a
+contributor (human or Claude) needs to work on this repo.
 
-```
-src/
-  shared/     types + helpers shared between operator and runner (the /turn
-              and /tasks API contracts, the structured stdout logger)
-  operator/   Deployment (1 replica): Telegram ingress, people index,
-              pod lifecycle, task sweep, /tasks API, admin commands
-  runner/     runs inside every person pod: /turn HTTP server, journal-based
-              dedup, one Claude Agent SDK query() per turn, direct Telegram
-              replies, schedule_task/list_tasks/cancel_task MCP tools
-```
+## Requirements
 
-This repo builds the image (`ghcr.io/pavlenkoa/pan-agent`) and owns the
-deploy manifests: `helm/pan-agent/` is the Helm chart ArgoCD pulls directly
-(multi-source Application — environment-specific values, e.g. node/NFS/network
-CIDRs, come from the deploying cluster's GitOps repo; see homelab's
-`kubernetes/apps/pan-agent/values/homelab.yaml`).
+- Node.js 24+
+- A Kubernetes cluster with NFS-backed storage (`ReadWriteMany`)
+- A Telegram bot token (one bot per deployment — see [BotFather](https://t.me/BotFather))
+- An Anthropic OAuth token (`claude setup-token`)
+- HashiCorp Vault + [External Secrets Operator](https://external-secrets.io/), or any way to land the secrets below into the cluster
 
 ## Develop
 
@@ -37,55 +26,73 @@ npm test
 npm run build   # -> dist/operator/index.js, dist/runner/index.js
 ```
 
+## Layout
+
+```
+src/
+  shared/     types + helpers shared between operator and runner
+  operator/   Deployment (1 replica): Telegram ingress, people index,
+              pod lifecycle, task sweep, /tasks API, admin + person commands
+  runner/     runs inside every person pod: persistent SDK session, /turn
+              HTTP server, journal-based dedup, MCP tools (scheduling,
+              attachments), direct Telegram replies
+helm/
+  pan-agent/  the Helm chart a deploying cluster's GitOps repo pulls
+```
+
 ## Configuration
 
-Operator (required env): `PERSON_POD_IMAGE`, `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_ADMIN_ID`. Optional: `TELEGRAM_ALLOWED_IDS` — a JSON array of
-Telegram user ids (e.g. `["333141234","7760060740"]`) that skip the
-pending/approve bootstrap and get provisioned immediately on first message.
-See `src/operator/config.ts` for every override (`NAMESPACE`, `NFS_SERVER`,
-`NFS_ROOT_PATH`, `NFS_MOUNT_PATH`, `SWEEP_INTERVAL_MS`, `CATCH_UP_WINDOW_MS`,
-`PERSONA_CONFIGMAP_NAME`, `MEDIA_PVC_NAME`, `PERSON_POD_NODE`, `DEFAULT_TZ`,
-`TASKS_API_PORT`, `POD_READY_TIMEOUT_MS`).
+**Operator** (env):
 
-Runner (required env, all set by the operator's pod template): `PERSON_SLUG`,
-`PERSON_CHAT_ID`, `PERSON_TASKS_TOKEN`, `OPERATOR_TASKS_URL`,
-`TELEGRAM_BOT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`. See `src/runner/config.ts`
-for overrides.
+| Variable | Required | Description |
+|---|---|---|
+| `PERSON_POD_IMAGE` | yes | Image tag/digest for person pods |
+| `TELEGRAM_BOT_TOKEN` | yes | Shared bot token (operator polls, pods reply directly) |
+| `TELEGRAM_ADMIN_ID` | yes | Telegram user id with admin commands |
+| `TELEGRAM_ALLOWED_IDS` | no | JSON array of ids that skip pending/approve and get provisioned on first message |
+| `NAMESPACE`, `NFS_SERVER`, `NFS_ROOT_PATH`, `NFS_MOUNT_PATH` | no | See `src/operator/config.ts` for defaults |
+| `SWEEP_INTERVAL_MS`, `CATCH_UP_WINDOW_MS` | no | Scheduled-task sweep cadence / missed-fire tolerance |
+| `PERSONA_CONFIGMAP_NAME`, `MEDIA_PVC_NAME`, `PERSON_POD_NODE`, `DEFAULT_TZ`, `TASKS_API_PORT`, `POD_READY_TIMEOUT_MS` | no | See `src/operator/config.ts` |
 
-`PERSON_TASKS_TOKEN` is a random token minted per person at approval time
-(stored in `pan-agent-people`, injected into that person's pod only) and sent
-as `Authorization: Bearer` on every `/tasks` call — the operator rejects any
-request whose token doesn't match the claimed slug. Without it, one person's
-pod could schedule/read/cancel tasks for any other person, since they all
-share the one `/tasks` API and network policy allows any person-pod to reach
-it.
+**Runner** (env, all set by the operator's pod template — nothing to configure by hand): `PERSON_SLUG`, `PERSON_CHAT_ID`, `PERSON_TASKS_TOKEN`, `OPERATOR_TASKS_URL`, `TELEGRAM_BOT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`. See `src/runner/config.ts` for optional overrides.
 
-## First deploy (summary — see the architecture doc's migration path for the full sequence)
+## Telegram commands
 
-pan-agent runs its own Telegram bot (**@shanovnybot**, display name "Пан
-Агент"), independent of `claude-code`'s bot — both can run at once, no
-scale-down needed.
+**Admin** (DM from `TELEGRAM_ADMIN_ID` only):
 
-1. Build & push the image (CI does this on push to `main`).
-2. On the Pi: `mkdir -p /media/pan-agent/{people,tracking}`, migrate existing
-   `~/.claude`/workspace/tracking data from `/media/claude-code` and
-   `/media/openclaw` if applicable.
-3. `claude setup-token` once, interactively; `vault kv put kv/anthropic
-   claude_oauth_token=...`. `telegram_bot_pan_agent_token`,
-   `telegram_admin_id`, and `telegram_allowed_ids` already live in
-   `kv/telegram`.
-4. Pin `PERSON_POD_IMAGE` / the operator container's image to a real digest in
-   homelab's `kubernetes/apps/pan-agent/values/homelab.yaml` (placeholder
-   `:latest` is there until the first CI build exists).
-5. Push `pan-agent` to app-of-apps (already done, not yet pushed to `homelab`)
-   and let ArgoCD sync.
-6. Message @shanovnybot from one of the `telegram_allowed_ids` — you're
-   auto-approved and get a pod immediately, no `/approve` needed.
+| Command | Description |
+|---|---|
+| `/approve <slug> <telegramUserId>` | Approve a pending sender, or pre-provision one |
+| `/deny <telegramUserId>` | Deny a sender — pod removed, future messages dropped |
+| `/people` | List active / pending / denied people |
+| `/restart <slug>` | Delete + recreate a person's pod |
 
-## Admin commands (DM from `TELEGRAM_ADMIN_ID`)
+**Every approved person**, for their own pod only:
 
-- `/approve <slug> <telegramUserId>` — approve a pending or pre-provision a person
-- `/deny <telegramUserId>` — deny a sender (silently dropped from then on)
-- `/people` — list active/pending/denied people
-- `/restart <slug>` — delete + recreate a person's pod
+| Command | Description |
+|---|---|
+| `/set_var KEY=VALUE [description]` | Add a persistent env var to your own pod (restarts to apply) |
+| `/list_vars` | List your custom env vars (names/descriptions, never values) |
+| `/unset_var KEY` | Remove a custom env var (restarts to apply) |
+| `/memories` | List what the assistant remembers about you |
+| `/forget_memory <filename>` | Delete one memory file |
+
+All of the above are intercepted before the message ever reaches the model — the
+Telegram `/` menu is registered per-chat, so an unapproved sender never even sees
+these commands exist.
+
+## Deploy
+
+CI builds and pushes `ghcr.io/pavlenkoa/pan-agent` on every push to `main`. The
+chart in `helm/pan-agent/` is what a deploying cluster's ArgoCD (or similar)
+pulls; environment-specific values (node selector, NFS server/paths, network
+CIDRs, image tag) live in that cluster's own GitOps repo, not here.
+
+Person pods are plain `Pod`s created directly by the operator, not managed by a
+`Deployment` — a new image requires deleting the running person pods and
+restarting the operator (whose boot reconcile recreates anything missing):
+
+```bash
+kubectl delete pod person-<slug> -n <namespace>
+kubectl rollout restart deployment/pan-agent-operator -n <namespace>
+```
