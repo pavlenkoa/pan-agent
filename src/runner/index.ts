@@ -21,7 +21,7 @@ import { promisify } from 'node:util';
 
 import { readJsonBody, sendJson } from '../shared/http.js';
 import { log } from '../shared/log.js';
-import type { TurnRequest } from '../shared/types.js';
+import type { ControlRequest, ControlResponse, TurnRequest } from '../shared/types.js';
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { createSessionController } from './session-controller.js';
@@ -134,8 +134,19 @@ async function main(): Promise<void> {
 
       try {
         const result = await controller.submitTurn(turn, key);
-        if (result.replyText) {
-          await sendTelegramReply(cfg.telegramBotToken, turn.chatId, result.replyText);
+        // A successful /compact or /clear produces an empty SDK result (confirmed
+        // live: the SDK handles these as a protocol-level event, not a model
+        // turn) — synthesize a confirmation so the person sees *something*
+        // rather than silence.
+        const replyText =
+          result.replyText ||
+          (turn.kind === 'control' && result.ok
+            ? turn.command === '/compact'
+              ? 'Compacted your conversation history.'
+              : 'Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
+            : '');
+        if (replyText) {
+          await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);
         }
         await journal.complete(key, result.ok ? 'ok' : 'error');
       } catch (err) {
@@ -144,6 +155,31 @@ async function main(): Promise<void> {
       }
     } finally {
       busy = false;
+    }
+  }
+
+  /** Live control-plane calls against this pod's already-running session — not a turn, no journal entry, works regardless of `busy`. */
+  async function handleControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: ControlRequest;
+    try {
+      body = await readJsonBody<ControlRequest>(req);
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: `invalid body: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+    try {
+      let response: ControlResponse;
+      if (body.action === 'context') {
+        response = { ok: true, action: 'context', context: await controller.getContextUsage() };
+      } else {
+        await controller.setEffortLevel(body.level);
+        response = { ok: true, action: 'effort' };
+      }
+      sendJson(res, 200, response);
+    } catch (err) {
+      log.error('control_request_failed', err, { person: cfg.slug });
+      const error: ControlResponse = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      sendJson(res, 500, error);
     }
   }
 
@@ -157,6 +193,11 @@ async function main(): Promise<void> {
 
     if (req.method === 'POST' && url.pathname === '/turn') {
       void handleTurn(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/control') {
+      void handleControl(req, res);
       return;
     }
 

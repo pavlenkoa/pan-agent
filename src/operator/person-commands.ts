@@ -12,12 +12,12 @@
  * the person about their own just-taken action.
  */
 import { log } from '../shared/log.js';
-import type { ChatMessage, PersonIndexEntry } from '../shared/types.js';
-import { enqueueChatMessage } from './delivery.js';
+import type { ChatMessage, ControlRequest, ControlResponse, EffortLevel, PersonIndexEntry } from '../shared/types.js';
+import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
 import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills } from './nfs.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
-import { recreatePod } from './pod-lifecycle.js';
-import { RESERVED_ENV_NAMES } from './pod-template.js';
+import { podIp, recreatePod } from './pod-lifecycle.js';
+import { RESERVED_ENV_NAMES, RUNNER_PORT } from './pod-template.js';
 import type { RouterDeps } from './router-deps.js';
 
 const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -87,6 +87,18 @@ export async function tryHandlePersonCommand(
       return true;
     case '/forget_skill':
       await handleForgetSkill(deps, slug, person, args, updateId);
+      return true;
+    case '/compact':
+      await handleControlTurn(deps, slug, person, '/compact', updateId);
+      return true;
+    case '/clear':
+      await handleControlTurn(deps, slug, person, '/clear', updateId);
+      return true;
+    case '/context':
+      await handleContext(deps, slug, person);
+      return true;
+    case '/effort':
+      await handleEffort(deps, slug, person, args);
       return true;
     default:
       return false;
@@ -260,4 +272,101 @@ async function handleForgetSkill(
       `The person just ran /forget_skill on ${name} — that skill's SKILL.md is gone. If they ask about it, or if you still see a stale reference to it in your own memory notes, it's really deleted, not still there.`,
     );
   }
+}
+
+/**
+ * `/compact` and `/clear` — confirmed live these are genuine SDK-recognized
+ * commands (a real `compact_boundary`/`conversation_reset` protocol event,
+ * not a model reply), but ONLY when pushed as the bare command text with
+ * nothing else in the message. A normal chat message would get
+ * `${fromHandle}: ${text}` prefixed by `buildPrompt` (sdk-session.ts) —
+ * confirmed live that's exactly what breaks it: the model sees
+ * "Andrii Pavlenko: /compact" and answers it as a question instead of the
+ * SDK ever recognizing the command. Routed as a `ControlTurn` through the
+ * same `/turn` delivery path (journal dedup, busy/retry) specifically to
+ * avoid that prefix, not through `enqueueChatMessage`.
+ */
+async function handleControlTurn(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  command: '/compact' | '/clear',
+  updateId: number,
+): Promise<void> {
+  const delivered = await sendTurnWithRetry(
+    deps.api,
+    deps.cfg,
+    slug,
+    person.chatId,
+    person.tz,
+    person.tasksToken,
+    { kind: 'control', updateId, chatId: person.chatId, command },
+    60_000,
+  );
+  if (!delivered) {
+    await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
+  }
+}
+
+/** POSTs to the person's own pod's `/control` endpoint — a live call against their already-running session, not a turn (see shared/types.ts). Returns null on any failure to reach the pod. */
+async function postControl(deps: RouterDeps, slug: string, body: ControlRequest): Promise<ControlResponse | null> {
+  const ip = await podIp(deps.api, deps.cfg.namespace, slug);
+  if (!ip) return null;
+  try {
+    const res = await fetch(`http://${ip}:${RUNNER_PORT}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return (await res.json()) as ControlResponse;
+  } catch (err) {
+    log.error('control_request_failed', err, { person: slug });
+    return null;
+  }
+}
+
+async function handleContext(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const result = await postControl(deps, slug, { action: 'context' });
+  if (!result) {
+    await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
+    return;
+  }
+  if (!result.ok || result.action !== 'context') {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't read context usage: ${!result.ok ? result.error : 'unexpected response'}`);
+    return;
+  }
+  const c = result.context;
+  const pct = ((c.totalTokens / c.maxTokens) * 100).toFixed(1);
+  const lines = [
+    `Model: ${c.model}`,
+    `Context: ${c.totalTokens.toLocaleString()} / ${c.maxTokens.toLocaleString()} tokens (${pct}%)`,
+    c.isAutoCompactEnabled && c.autoCompactThreshold != null
+      ? `Auto-compacts at: ${c.autoCompactThreshold.toLocaleString()} tokens`
+      : 'Auto-compact: disabled for this session',
+  ];
+  await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
+}
+
+const VALID_EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh'];
+
+async function handleEffort(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+  const [level] = args;
+  if (!level || !VALID_EFFORT_LEVELS.includes(level as EffortLevel)) {
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /effort low|medium|high|xhigh');
+    return;
+  }
+  const result = await postControl(deps, slug, { action: 'effort', level: level as EffortLevel });
+  if (!result) {
+    await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
+    return;
+  }
+  if (!result.ok) {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't set effort level: ${result.error}`);
+    return;
+  }
+  await deps.telegram.sendMessage(
+    person.chatId,
+    `Effort level set to ${level} for this session (resets to medium if your pod restarts).`,
+  );
 }

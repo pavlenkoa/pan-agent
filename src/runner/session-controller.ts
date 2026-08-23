@@ -15,7 +15,7 @@
 import { query as sdkQuery, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { TurnRequest } from '../shared/types.js';
+import type { ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
   buildPrompt,
@@ -24,6 +24,7 @@ import {
   logSdkMessage,
   readSavedSessionId,
   saveSessionId,
+  summarizeContextUsage,
   summarizeUsage,
 } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
@@ -39,6 +40,10 @@ export interface SessionController {
   stop(): Promise<void>;
   isBusy(): boolean;
   submitTurn(turn: TurnRequest, turnId: string): Promise<TurnResult>;
+  /** Live control-plane read, not a turn — no journal entry, doesn't wait on `isBusy()`. Throws if the session hasn't started yet. */
+  getContextUsage(): Promise<ContextUsageSummary>;
+  /** Live control-plane write, not a turn — session-scoped only (confirmed live: not persisted to a settings file, resets to the `buildQueryOptions` default on pod restart). Throws if the session hasn't started yet. */
+  setEffortLevel(level: EffortLevel): Promise<void>;
 }
 
 type QueryFn = typeof sdkQuery;
@@ -236,5 +241,13 @@ export function createSessionController(cfg: RunnerConfig, queryFn: QueryFn = sd
     },
     isBusy,
     submitTurn,
+    async getContextUsage(): Promise<ContextUsageSummary> {
+      if (!queryHandle) throw new Error('session not started yet');
+      return summarizeContextUsage(await queryHandle.getContextUsage());
+    },
+    async setEffortLevel(level: EffortLevel): Promise<void> {
+      if (!queryHandle) throw new Error('session not started yet');
+      await queryHandle.applyFlagSettings({ effortLevel: level });
+    },
   };
 }

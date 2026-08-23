@@ -32,6 +32,10 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'forget_memory', description: 'Delete one memory file by name (see /memories)' },
   { command: 'skills', description: 'List custom skills the assistant has built for you' },
   { command: 'forget_skill', description: 'Delete one custom skill by name (see /skills)' },
+  { command: 'context', description: 'Show current context/token usage for your session' },
+  { command: 'effort', description: 'Set model effort for this session: low|medium|high|xhigh' },
+  { command: 'compact', description: 'Manually compact your conversation history now' },
+  { command: 'clear', description: 'Start a fresh conversation (memory/tasks are unaffected)' },
 ];
 
 /** The admin is also a tenant (router.ts) — their chat gets both lists. */

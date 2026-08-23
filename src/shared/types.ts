@@ -39,12 +39,57 @@ export interface TaskTurn {
   prompt: string;
 }
 
-export type TurnRequest = ChatTurn | TaskTurn;
+/**
+ * `/compact` and `/clear` are real SDK-recognized commands (confirmed live:
+ * pushing the bare text produces a genuine `compact_boundary`/
+ * `conversation_reset` protocol message, not a model reply) — but ONLY as
+ * the literal command text with nothing else in the message. A normal
+ * ChatTurn always gets `${fromHandle}: ${text}` prefixed by `buildPrompt`
+ * (confirmed live this is exactly what broke it in production — the model
+ * saw "Andrii Pavlenko: /compact" and answered it as a real question
+ * instead of the SDK ever recognizing the command). This turn kind exists
+ * so `buildPrompt`/`buildUserMessage` can push the bare command with no
+ * prefix, while still going through the same single-flight queue, journal
+ * dedup, and busy/retry delivery as any other turn.
+ */
+export interface ControlTurn {
+  kind: 'control';
+  updateId: number;
+  chatId: number;
+  command: '/compact' | '/clear';
+}
+
+export type TurnRequest = ChatTurn | TaskTurn | ControlTurn;
 
 /** Turn journal key: dedup identity for a turn. */
 export function turnKey(turn: TurnRequest): string {
-  return turn.kind === 'chat' ? `tg:${turn.updateId}` : `task:${turn.taskId}:${turn.scheduledFor}`;
+  if (turn.kind === 'chat') return `tg:${turn.updateId}`;
+  if (turn.kind === 'control') return `ctl:${turn.updateId}`;
+  return `task:${turn.taskId}:${turn.scheduledFor}`;
 }
+
+// ---------------------------------------------------------------------------
+// /control — operator -> pod, live session introspection/config (not a turn:
+// no journal entry, no single-flight queue — a direct control-plane call
+// against the person's already-running SDK session)
+// ---------------------------------------------------------------------------
+
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
+
+export interface ContextUsageSummary {
+  model: string;
+  totalTokens: number;
+  maxTokens: number;
+  autoCompactThreshold: number | null;
+  isAutoCompactEnabled: boolean;
+}
+
+export type ControlRequest = { action: 'context' } | { action: 'effort'; level: EffortLevel };
+
+export type ControlResponse =
+  | { ok: true; action: 'context'; context: ContextUsageSummary }
+  | { ok: true; action: 'effort' }
+  | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
 // People index — pan-agent-people ConfigMap

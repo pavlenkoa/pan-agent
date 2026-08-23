@@ -12,7 +12,7 @@ import path from 'node:path';
 import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { TurnRequest } from '../shared/types.js';
+import type { ContextUsageSummary, TurnRequest } from '../shared/types.js';
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
@@ -45,6 +45,13 @@ export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promi
 export function buildPrompt(turn: TurnRequest): string {
   if (turn.kind === 'task') {
     return `[Scheduled task ${turn.taskId}, due ${turn.scheduledFor}]\n${turn.prompt}`;
+  }
+  if (turn.kind === 'control') {
+    // Must be the bare command with nothing else in the message — confirmed
+    // live this is what the SDK's own command recognition requires. A
+    // ChatTurn's `${fromHandle}: ${text}` prefix below is exactly what
+    // broke this in production before ControlTurn existed.
+    return turn.command;
   }
   return turn.messages.map((m) => (m.fromHandle ? `${m.fromHandle}: ${m.text}` : m.text)).join('\n');
 }
@@ -173,6 +180,12 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
     cwd: cfg.workspaceCwd,
     ...(sessionId ? { resume: sessionId } : {}),
     permissionMode: 'acceptEdits',
+    // Explicit rather than relying on "whatever the account/SDK currently
+    // defaults to" — confirmed live this SDK version already defaults to
+    // claude-sonnet-5 with no model set, but pinning it means a future
+    // default-model change on Anthropic's side can't silently change what
+    // every person pod runs.
+    model: 'claude-sonnet-5',
     // Explicit rather than relying on the SDK's own default-when-omitted
     // behavior — guarantees the auto-memory instructions (and everything
     // else the preset carries) are actually present regardless of SDK
@@ -182,6 +195,20 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
     settings: {
       autoMemoryEnabled: true,
       autoMemoryDirectory: path.join(cfg.claudeHome, MEMORY_DIR_NAME),
+      // Confirmed live 2026-08-23: the SDK's own default autoCompactThreshold
+      // is already ~217,000 tokens regardless of the model's much larger raw
+      // context window (1,000,000 for Sonnet 5) — well under the 250K target,
+      // so no override needed. `settings.autoCompactWindow` was tried (both
+      // here at session-start and via `applyFlagSettings` mid-session, set to
+      // both 250000 and 100000) and had zero observed effect on
+      // `getContextUsage()`'s reported `autoCompactThreshold` either time —
+      // don't reach for it expecting it to set an explicit ceiling, it
+      // doesn't appear to do that. `effortLevel` here is overridable live via
+      // `/effort` (person-commands.ts -> runner's /control endpoint ->
+      // `applyFlagSettings`), confirmed live to accept the change without
+      // error; not independently confirmed to change model output, but
+      // matches the SDK's documented behavior for this field exactly.
+      effortLevel: 'medium',
     },
     tools: BUILTIN_TOOLS,
     // Explicit rather than relying on "omitted = CLI defaults apply" (same
@@ -211,6 +238,23 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
       ...SCHEDULING_TOOLS,
       ...ATTACHMENT_TOOLS,
     ],
+  };
+}
+
+/** Narrows the SDK's much larger `getContextUsage()` response (category breakdowns, grid rows, per-tool/skill token costs, ...) down to what a `/context` reply actually needs. */
+export function summarizeContextUsage(usage: {
+  model: string;
+  totalTokens: number;
+  maxTokens: number;
+  autoCompactThreshold?: number;
+  isAutoCompactEnabled: boolean;
+}): ContextUsageSummary {
+  return {
+    model: usage.model,
+    totalTokens: usage.totalTokens,
+    maxTokens: usage.maxTokens,
+    autoCompactThreshold: usage.autoCompactThreshold ?? null,
+    isAutoCompactEnabled: usage.isAutoCompactEnabled,
   };
 }
 
