@@ -6,10 +6,12 @@
  */
 import { readFile, writeFile } from 'node:fs/promises';
 
-import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
 import type { TurnRequest } from '../shared/types.js';
+import { buildAttachmentMcpServer } from './attachment-tools.js';
+import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
 import { buildSchedulingMcpServer } from './scheduling-tools.js';
 
@@ -44,6 +46,54 @@ function buildPrompt(turn: TurnRequest): string {
   return turn.messages.map((m) => (m.fromHandle ? `${m.fromHandle}: ${m.text}` : m.text)).join('\n');
 }
 
+/**
+ * Chat turns with attachments need the SDK's streaming-input form (a single
+ * yielded SDKUserMessage) so a photo can go in as real vision content, not
+ * just its text form. Everything else keeps the plain string prompt.
+ */
+async function buildPromptInput(
+  cfg: RunnerConfig,
+  turn: TurnRequest,
+  promptText: string,
+): Promise<string | AsyncIterable<SDKUserMessage>> {
+  if (turn.kind !== 'chat') return promptText;
+  const attachments = turn.messages.flatMap((m) => m.attachments ?? []);
+  if (attachments.length === 0) return promptText;
+
+  const { images, notes } = await resolveAttachments(cfg, attachments);
+  const fullText = notes.length > 0 ? `${promptText}\n${notes.join('\n')}` : promptText;
+
+  async function* single(): AsyncGenerator<SDKUserMessage> {
+    yield {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: fullText }, ...images] },
+      parent_tool_use_id: null,
+    };
+  }
+  return single();
+}
+
+/**
+ * The SDK's Bash tool supports `run_in_background`, but this runner spins
+ * up a fresh `query()` per /turn — when the turn ends the whole session
+ * process (and any backgrounded command + its completion notification) dies
+ * with it. Deny it up front so the model gets a live error and falls back
+ * to a synchronous wait (Bash `timeout`, up to 10min) or `schedule_task` for
+ * anything longer, instead of silently losing the follow-up.
+ */
+const denyBackgroundedBash: CanUseTool = async (toolName, input) => {
+  if (toolName === 'Bash' && input['run_in_background'] === true) {
+    return {
+      behavior: 'deny',
+      message:
+        'Backgrounded bash does not work in this environment — the turn ends and the background process (and any ' +
+        'notification about it) is killed with it. Re-run the command in the foreground (add a `timeout` up to ' +
+        '600000ms if it needs to wait), or use schedule_task if you genuinely need to check back later.',
+    };
+  }
+  return { behavior: 'allow', updatedInput: input };
+};
+
 export interface TurnResult {
   replyText: string;
   ok: boolean;
@@ -55,12 +105,15 @@ const SCHEDULING_TOOLS = [
   'mcp__pan-agent-scheduling__cancel_task',
 ];
 
+const ATTACHMENT_TOOLS = ['mcp__pan-agent-attachments__send_file'];
+
 export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: string): Promise<TurnResult> {
-  const prompt = buildPrompt(turn);
+  const promptText = buildPrompt(turn);
+  const prompt = await buildPromptInput(cfg, turn, promptText);
   const sessionId = await readSavedSessionId(cfg);
 
   log.line('turn_start', { person: cfg.slug, session: sessionId, turn: turnId, kind: turn.kind });
-  const { text: userText, bytes: userBytes } = truncateText(prompt);
+  const { text: userText, bytes: userBytes } = truncateText(promptText);
   log.line('user', { person: cfg.slug, turn: turnId, text: userText, bytes: userBytes });
 
   const startedAt = Date.now();
@@ -70,8 +123,23 @@ export async function runTurn(cfg: RunnerConfig, turn: TurnRequest, turnId: stri
       cwd: cfg.workspaceCwd,
       ...(sessionId ? { resume: sessionId } : {}),
       permissionMode: 'acceptEdits',
-      mcpServers: { 'pan-agent-scheduling': buildSchedulingMcpServer(cfg) },
-      allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...SCHEDULING_TOOLS],
+      canUseTool: denyBackgroundedBash,
+      mcpServers: {
+        'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
+        'pan-agent-attachments': buildAttachmentMcpServer(cfg),
+      },
+      allowedTools: [
+        'Bash',
+        'Read',
+        'Write',
+        'Edit',
+        'Glob',
+        'Grep',
+        'WebFetch',
+        'WebSearch',
+        ...SCHEDULING_TOOLS,
+        ...ATTACHMENT_TOOLS,
+      ],
     },
   });
 

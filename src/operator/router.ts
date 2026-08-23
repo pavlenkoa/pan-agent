@@ -4,6 +4,7 @@
  * denied -> dropped silently. Admin DMs starting with a recognized command
  * are intercepted first.
  */
+import type { ChatAttachment } from '../shared/types.js';
 import { log } from '../shared/log.js';
 import { tryHandleAdminCommand } from './admin-commands.js';
 import { enqueueChatMessage } from './delivery.js';
@@ -11,6 +12,22 @@ import { findSlugByTelegramUserId, readPeopleIndex, recordPending, touchLastSeen
 import { provisionPerson, slugifyForPerson, uniqueSlug } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
 import type { TelegramMessage, TelegramUpdate } from './telegram.js';
+
+/** Largest photo size is last in Telegram's array; documents pass through as-is. */
+function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined {
+  const attachments: ChatAttachment[] = [];
+  const photo = msg.photo?.at(-1);
+  if (photo) attachments.push({ kind: 'photo', fileId: photo.file_id, fileName: null, mimeType: null });
+  if (msg.document) {
+    attachments.push({
+      kind: 'document',
+      fileId: msg.document.file_id,
+      fileName: msg.document.file_name ?? null,
+      mimeType: msg.document.mime_type ?? null,
+    });
+  }
+  return attachments.length > 0 ? attachments : undefined;
+}
 
 export type { RouterDeps } from './router-deps.js';
 
@@ -39,9 +56,10 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   await touchLastSeen(deps.api, deps.cfg.namespace, slug);
   await enqueueChatMessage(deps.api, deps.cfg, slug, person.chatId, person.tz, person.tasksToken, update.update_id, {
     messageId: msg.message_id,
-    text: msg.text ?? '',
+    text: msg.text ?? msg.caption ?? '',
     fromHandle: msg.from.username ? `@${msg.from.username}` : null,
     date: new Date(msg.date * 1000).toISOString(),
+    attachments: extractAttachments(msg),
   });
 }
 
@@ -93,9 +111,10 @@ async function autoApprove(
   );
   await enqueueChatMessage(deps.api, deps.cfg, slug, entry.chatId, entry.tz, entry.tasksToken, update.update_id, {
     messageId: msg.message_id,
-    text: msg.text ?? '',
+    text: msg.text ?? msg.caption ?? '',
     fromHandle: msg.from?.username ? `@${msg.from.username}` : null,
     date: new Date(msg.date * 1000).toISOString(),
+    attachments: extractAttachments(msg),
   });
   log.line('person_auto_approved', { person: slug, telegramUserId });
 }

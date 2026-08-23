@@ -37,3 +37,49 @@ export async function sendTelegramReply(token: string, chatId: number, text: str
     await sendMessage(token, chatId, chunk);
   }
 }
+
+// Telegram's own cap on bot-uploaded files (multipart, not a local Bot API server).
+export const TELEGRAM_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+async function uploadFile(
+  token: string,
+  method: 'sendDocument' | 'sendPhoto',
+  field: 'document' | 'photo',
+  chatId: number,
+  fileName: string,
+  bytes: Buffer,
+  caption?: string,
+): Promise<void> {
+  const form = new FormData();
+  form.set('chat_id', String(chatId));
+  if (caption) form.set('caption', caption);
+  form.set(field, new Blob([bytes]), fileName);
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  });
+  const data = (await res.json()) as { ok: boolean; description?: string };
+  if (!data.ok) throw new Error(`${method} failed: ${data.description ?? res.status}`);
+}
+
+export async function sendTelegramDocument(
+  token: string,
+  chatId: number,
+  fileName: string,
+  bytes: Buffer,
+  caption?: string,
+): Promise<void> {
+  await uploadFile(token, 'sendDocument', 'document', chatId, fileName, bytes, caption);
+}
+
+export async function sendTelegramPhoto(
+  token: string,
+  chatId: number,
+  fileName: string,
+  bytes: Buffer,
+  caption?: string,
+): Promise<void> {
+  await uploadFile(token, 'sendPhoto', 'photo', chatId, fileName, bytes, caption);
+}

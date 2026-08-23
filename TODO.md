@@ -137,6 +137,65 @@ call for its own slug succeeded normally.
 - No channels beyond Telegram, no group chats, no idle teardown, no
   horizontal scale — all intentionally out of scope for v1.
 
+### Session 2026-08-23: backgrounded-bash dead end + Telegram attachments
+
+Found via a real conversation transcript: the model backgrounded a `sleep && check`
+Bash command intending to follow up once it finished, but the follow-up never
+arrived — root cause is architectural, not a bug in that one turn. This runner
+does one `query()` per `/turn`; when the model stops calling tools and gives its
+final answer, the whole SDK session process tears down, killing any backgrounded
+command and losing whatever notification would have reported it done. The SDK's
+own async-continuation machinery (background bash, Monitor, CronCreate,
+ScheduleWakeup) all assume a long-lived interactive session this architecture
+doesn't have — `schedule_task` is the only thing here that actually survives
+past a turn boundary.
+
+Fixed two ways:
+- `sdk-session.ts` now passes a `canUseTool` that denies any `Bash` call with
+  `run_in_background: true`, with a message telling the model to run it in
+  the foreground (up to Bash's 10min timeout) or use `schedule_task` instead
+  — turns a silent black hole into a live, self-correcting error.
+- Persona (`configmap-persona.yaml`) now states this explicitly: no
+  backgrounded waiting, no "I'll get back to you in a minute" unless it's
+  actually a synchronous foreground wait within the same turn.
+
+Also closed the attachments gap (previously: incoming photos/files were
+silently dropped as empty-text turns; the bot had no way to send a file back
+at all — both confirmed missing by reading the code, not just reported).
+- **Receiving:** `operator/telegram.ts` + `router.ts` now parse `photo`/
+  `document`/`caption` off inbound Telegram messages into
+  `ChatMessage.attachments` (`shared/types.ts`). The runner downloads these
+  itself with its own `TELEGRAM_BOT_TOKEN` (`runner/attachments.ts`) — no
+  operator-side file handling needed, only the small `file_id` crosses the
+  `/turn` HTTP call. Photos go in as real inline vision content (SDK
+  streaming-input form, one `SDKUserMessage` with text + image blocks);
+  documents get saved under `workspace/inbox/` and referenced by path for
+  Bash/Read to pick up.
+- **Sending:** new `send_file` MCP tool (`runner/attachment-tools.ts`,
+  `telegram-send.ts`'s `sendTelegramDocument`/`sendTelegramPhoto`) lets the
+  model send a local file back — restricted to paths under the workspace,
+  `/media`, or `/tracking`; enforces Telegram's 50MB bot-upload cap with a
+  clear error instead of a silent failure.
+
+Typecheck clean, all 29 existing tests still pass (no test coverage added for
+`sdk-session.ts`/`attachments.ts` — consistent with the existing pattern of
+not unit-testing the SDK-wrapping/glue modules).
+
+**Not yet done:**
+- [ ] Commit + push both repos (this repo + `homelab`'s persona/values if
+      touched) — held pending confirmation since push triggers a `:latest`
+      image build and this bot has live users.
+- [ ] After deploy, existing person pods need `/restart <slug>` (or a pod
+      delete) to actually pick up the new image — running pods don't
+      auto-restart on a new `:latest` push.
+- [ ] Not tested live: attachment round-trip (send a photo, ask the bot to
+      describe it; ask it to send a file back) and the backgrounded-bash
+      denial actually surfacing as a message the model reacts to correctly.
+- [ ] Documents/images arriving via `document` (not `photo`) never get vision
+      treatment even if they're actually images — only Telegram's `photo`
+      field does. Fine for now; `Read` can still open an image file from
+      disk if the model thinks to.
+
 ### Loose ends worth a look
 - [ ] `operator-deployment.yaml` `strategy: Recreate` means a brief window on
       every operator rollout where nobody is polling Telegram — acceptable

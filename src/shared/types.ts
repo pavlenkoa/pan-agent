@@ -9,11 +9,19 @@
 // /turn — operator -> pod
 // ---------------------------------------------------------------------------
 
+export interface ChatAttachment {
+  kind: 'photo' | 'document';
+  fileId: string;
+  fileName: string | null;
+  mimeType: string | null;
+}
+
 export interface ChatMessage {
   messageId: number;
   text: string;
   fromHandle: string | null;
   date: string; // ISO 8601
+  attachments?: ChatAttachment[];
 }
 
 export interface ChatTurn {
