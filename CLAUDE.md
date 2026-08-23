@@ -139,7 +139,12 @@ stdout to your log backend picks it up like any other pod.
   the SDK even prints a `CAN_USE_TOOL_SHADOWED` warning about this at boot.
   `CronCreate` and its relatives are excluded from `tools` permanently: it's
   a session-only, non-durable timer with a hard 7-day expiry, strictly worse
-  than `schedule_task` regardless of process lifetime.
+  than `schedule_task` regardless of process lifetime. `Skill` hit the exact
+  same gotcha: a `SKILL.md` with YAML frontmatter under
+  `.claude/skills/<name>/` is auto-discovered and listed regardless of
+  `tools`, but is silently uninvokable unless `'Skill'` is also in `tools` —
+  confirmed live against the installed SDK before relying on either
+  behavior.
 - **Check for a native SDK feature before building one.** Before adding
   bespoke persistent-memory plumbing, checking the *installed*
   `@anthropic-ai/claude-agent-sdk` package's own type definitions
@@ -207,11 +212,9 @@ inbound/outbound Telegram attachments (including multi-file albums),
 persistent per-person SDK sessions (backgrounded Bash + proactive
 follow-ups), `/set_var` family for self-service persistent env vars, native
 auto-memory + `/memories`/`/forget_memory`, chat-scoped native Telegram
-command menus. A full security review of credential handling, the
-attachment path allowlist, MCP tool surface, and NFS isolation has been done
-once; not a recurring process yet.
-
-Not yet started: per-person custom **Skills** (persistent,
-person-managed `.claude/skills/<name>/SKILL.md`, likely mostly native SDK
-discovery plus a thin oversight-command layer, same shape as the memory
-work).
+command menus, per-person custom **Skills** (model-authored
+`.claude/skills/<name>/SKILL.md` in the person's own workspace via native
+SDK `Skill`-tool invocation, plus `/skills`/`/forget_skill` for oversight —
+same shape as the memory work, no ConfigMap involved). A full security
+review of credential handling, the attachment path allowlist, MCP tool
+surface, and NFS isolation has been done once; not a recurring process yet.

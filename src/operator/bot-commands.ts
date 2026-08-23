@@ -30,6 +30,8 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'unset_var', description: 'Remove a custom env var by name' },
   { command: 'memories', description: 'List what the assistant remembers about you' },
   { command: 'forget_memory', description: 'Delete one memory file by name (see /memories)' },
+  { command: 'skills', description: 'List custom skills the assistant has built for you' },
+  { command: 'forget_skill', description: 'Delete one custom skill by name (see /skills)' },
 ];
 
 /** The admin is also a tenant (router.ts) — their chat gets both lists. */

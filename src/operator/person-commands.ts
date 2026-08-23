@@ -14,7 +14,7 @@
 import { log } from '../shared/log.js';
 import type { ChatMessage, PersonIndexEntry } from '../shared/types.js';
 import { enqueueChatMessage } from './delivery.js';
-import { deleteMemoryFile, listMemoryFiles } from './nfs.js';
+import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills } from './nfs.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
 import { RESERVED_ENV_NAMES } from './pod-template.js';
@@ -81,6 +81,12 @@ export async function tryHandlePersonCommand(
       return true;
     case '/forget_memory':
       await handleForgetMemory(deps, slug, person, args, updateId);
+      return true;
+    case '/skills':
+      await handleListSkills(deps, slug, person);
+      return true;
+    case '/forget_skill':
+      await handleForgetSkill(deps, slug, person, args, updateId);
       return true;
     default:
       return false;
@@ -208,6 +214,50 @@ async function handleForgetMemory(
       person,
       updateId,
       `The person just ran /forget_memory on ${name} — that memory file is gone, and its MEMORY.md index entry too. If they ask about it, it's really deleted, not still there.`,
+    );
+  }
+}
+
+/**
+ * /skills and /forget_skill manage a person's own custom skills directly on
+ * the NFS workspace mount (operator/nfs.ts), same as /memories/forget_memory
+ * — no pod restart needed either way, and the SDK itself picks up filesystem
+ * changes under .claude/skills/ live, mid-session, on its own (confirmed
+ * against the installed SDK before relying on it). The shared `media` skill
+ * is never listed or deletable here — it isn't this person's own state.
+ */
+async function handleListSkills(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const skills = await listPersonSkills(slug);
+  if (skills.length === 0) {
+    await deps.telegram.sendMessage(person.chatId, 'No custom skills yet.');
+    return;
+  }
+  const lines = skills.map((s) => `${s.name} — ${s.description} (updated ${s.modifiedAt})`);
+  await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
+}
+
+async function handleForgetSkill(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
+  const [name] = args;
+  if (!name) {
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /forget_skill <name> — see /skills for names.');
+    return;
+  }
+  const removed = await deletePersonSkill(slug, name);
+  await deps.telegram.sendMessage(person.chatId, removed ? `Forgot the ${name} skill.` : `No such skill: ${name}`);
+  if (removed) {
+    log.line('skill_forgotten', { person: slug, name });
+    notifyModel(
+      deps,
+      slug,
+      person,
+      updateId,
+      `The person just ran /forget_skill on ${name} — that skill's SKILL.md is gone. If they ask about it, or if you still see a stale reference to it in your own memory notes, it's really deleted, not still there.`,
     );
   }
 }

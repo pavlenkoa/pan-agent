@@ -4,7 +4,7 @@
  * mount not-yet-existing subpaths, so this sidesteps needing an
  * openclaw-style root initContainer/chown dance.
  */
-import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const NFS_MOUNT_PATH = process.env['NFS_MOUNT_PATH'] ?? '/mnt/pan-agent-nfs';
@@ -80,5 +80,77 @@ export async function deleteMemoryFile(slug: string, name: string): Promise<bool
   if (!files.some((f) => f.name === name)) return false;
   await unlink(path.join(personMemoryDir(slug), name));
   if (name !== 'MEMORY.md') await pruneMemoryIndex(slug, name);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Skills (/skills, /forget_skill) — person-authored .claude/skills/<name>/
+// under the person's *workspace* (not claudeHome — same directory the SDK's
+// native Skill discovery scans, and where the shared `media` skill already
+// lives). `media` is the shared skill (reinstalled on every boot by
+// installPersonaFiles) and is deliberately excluded/unremovable here — it
+// isn't this person's own state.
+// ---------------------------------------------------------------------------
+
+const SHARED_SKILL_NAME = 'media';
+
+function personSkillsDir(slug: string): string {
+  return path.join(NFS_MOUNT_PATH, 'people', slug, 'workspace', '.claude', 'skills');
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  modifiedAt: string; // ISO 8601
+}
+
+/** Pulls `name`/`description` out of a SKILL.md's `---`-fenced YAML frontmatter — hand-rolled rather than pulling in a YAML dependency for two scalar fields (same convention as parseSetVarArgs). */
+function parseSkillFrontmatter(content: string): { name?: string; description?: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match?.[1]) return {};
+  const result: { name?: string; description?: string } = {};
+  for (const line of match[1].split('\n')) {
+    const kv = line.match(/^(name|description):\s*(.*)$/);
+    if (kv?.[1] && kv[2] !== undefined) result[kv[1] as 'name' | 'description'] = kv[2].trim();
+  }
+  return result;
+}
+
+/** Person-authored skills only — excludes the shared `media` skill, same framing as listMemoryFiles only ever showing this person's own state. */
+export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(personSkillsDir(slug));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  const skills = await Promise.all(
+    entries
+      .filter((name) => name !== SHARED_SKILL_NAME)
+      .map(async (name) => {
+        const skillMdPath = path.join(personSkillsDir(slug), name, 'SKILL.md');
+        let content: string;
+        let st;
+        try {
+          content = await readFile(skillMdPath, 'utf8');
+          st = await stat(skillMdPath);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw err;
+        }
+        const fm = parseSkillFrontmatter(content);
+        return { name, description: fm.description ?? '(no description)', modifiedAt: st.mtime.toISOString() };
+      }),
+  );
+  return skills.filter((s): s is SkillInfo => s !== null).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Recursively deletes one person-authored skill by directory name. Only ever deletes a name that showed up in listPersonSkills — no path traversal surface, and the shared `media` skill can never be targeted this way. */
+export async function deletePersonSkill(slug: string, name: string): Promise<boolean> {
+  if (name === SHARED_SKILL_NAME) return false;
+  const skills = await listPersonSkills(slug);
+  if (!skills.some((s) => s.name === name)) return false;
+  await rm(path.join(personSkillsDir(slug), name), { recursive: true, force: true });
   return true;
 }

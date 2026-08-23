@@ -97,8 +97,15 @@ const ATTACHMENT_TOOLS = ['mcp__pan-agent-attachments__send_file'];
  * persistent — it's session-only/non-durable with a 7-day hard expiry
  * (confirmed from the tool's own spec), strictly worse than `schedule_task`
  * regardless of process lifetime.
+ *
+ * `Skill` hits the exact same gotcha and was confirmed the same way: a
+ * `SKILL.md` under `<cwd>/.claude/skills/<name>/` with YAML frontmatter is
+ * auto-discovered and listed in the SDK's `system/init` message regardless
+ * of `tools`, but the model can't actually invoke it via the `Skill` tool
+ * unless `'Skill'` is in this array — confirmed live against the installed
+ * SDK (discovered-but-uninvokable without it, invokable with it).
  */
-const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+const BUILTIN_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Skill'];
 
 /**
  * One-time query options, built once at session-controller start. Backgrounded
@@ -135,6 +142,15 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
       autoMemoryDirectory: path.join(cfg.claudeHome, MEMORY_DIR_NAME),
     },
     tools: BUILTIN_TOOLS,
+    // Explicit rather than relying on "omitted = CLI defaults apply" (same
+    // philosophy as the systemPrompt preset above) — 'all' enables every
+    // skill discovered under cwd's .claude/skills/, which for this runner
+    // means only the shared `media` skill (once it gets frontmatter) and
+    // whatever a person has created for themselves under their own
+    // workspace. Confirmed live that this option doesn't gate discovery
+    // (skills show up in system/init's `skills` list either way) — it's
+    // `'Skill'` in `tools` above that actually gates invocation.
+    skills: 'all',
     mcpServers: {
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),
@@ -148,6 +164,7 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
       'Grep',
       'WebFetch',
       'WebSearch',
+      'Skill',
       ...SCHEDULING_TOOLS,
       ...ATTACHMENT_TOOLS,
     ],
