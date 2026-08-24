@@ -3,6 +3,9 @@
  * to api.telegram.org itself, so a wedged operator can't eat an in-flight
  * reply.
  */
+import { log } from '../shared/log.js';
+import { markdownToTelegramHtml } from './telegram-format.js';
+
 const TELEGRAM_MAX_LEN = 4000;
 
 export function chunkText(text: string, maxLen = TELEGRAM_MAX_LEN): string[] {
@@ -19,15 +22,35 @@ export function chunkText(text: string, maxLen = TELEGRAM_MAX_LEN): string[] {
   return chunks;
 }
 
-async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+async function postSendMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  parseMode?: 'HTML',
+): Promise<{ ok: boolean; description?: string }> {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({ chat_id: chatId, text, ...(parseMode ? { parse_mode: parseMode } : {}) }),
     signal: AbortSignal.timeout(10_000),
   });
-  const data = (await res.json()) as { ok: boolean; description?: string };
-  if (!data.ok) throw new Error(`sendMessage failed: ${data.description ?? res.status}`);
+  return (await res.json()) as { ok: boolean; description?: string };
+}
+
+/**
+ * HTML-formatted first — `markdownToTelegramHtml` is a best-effort regex
+ * converter, not a real parser, so Telegram rejecting the whole message
+ * with a 400 "can't parse entities" on malformed/misnested tags is a real
+ * possibility. Falling back to plain text on exactly that failure means a
+ * converter bug degrades to "looks like the old literal-markdown bug"
+ * instead of losing the message outright.
+ */
+async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+  const formatted = await postSendMessage(token, chatId, markdownToTelegramHtml(text), 'HTML');
+  if (formatted.ok) return;
+  log.error('telegram_html_send_failed', new Error(formatted.description ?? 'unknown'), { chatId });
+  const plain = await postSendMessage(token, chatId, text);
+  if (!plain.ok) throw new Error(`sendMessage failed: ${plain.description ?? 'unknown'}`);
 }
 
 export async function sendTelegramReply(token: string, chatId: number, text: string): Promise<void> {
