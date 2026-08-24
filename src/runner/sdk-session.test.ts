@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { turnKey } from '../shared/types.js';
-import { buildPrompt, TASK_NO_UPDATE_MARKER } from './sdk-session.js';
+import { buildPrompt, resolveReplyText, TASK_NO_UPDATE_MARKER } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
   it('returns the bare command with no prefix, regardless of chatId', () => {
@@ -48,6 +48,70 @@ describe('buildPrompt — TaskTurn', () => {
     expect(prompt).toContain('[Scheduled task task-1, due 2026-08-24T09:00:00Z]');
     expect(prompt).toContain('Check if Silo has new episodes.');
     expect(prompt).toContain(TASK_NO_UPDATE_MARKER);
+  });
+});
+
+describe('resolveReplyText — TaskTurn no-update suppression', () => {
+  const task = { kind: 'task' as const, taskId: 'task-1', scheduledFor: '2026-08-24T09:00:00Z', chatId: 42, prompt: 'check' };
+
+  it('suppresses delivery on an exact TASK_NO_UPDATE_MARKER reply', () => {
+    expect(resolveReplyText(task, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
+      replyText: '',
+      isTaskNoUpdate: true,
+    });
+  });
+
+  it('still suppresses when the marker has surrounding whitespace', () => {
+    expect(resolveReplyText(task, { replyText: `  ${TASK_NO_UPDATE_MARKER}\n`, ok: true })).toEqual({
+      replyText: '',
+      isTaskNoUpdate: true,
+    });
+  });
+
+  it('passes through a real task reply untouched', () => {
+    expect(resolveReplyText(task, { replyText: 'нова серія вийшла!', ok: true })).toEqual({
+      replyText: 'нова серія вийшла!',
+      isTaskNoUpdate: false,
+    });
+  });
+
+  it('does not suppress a ChatTurn even if its reply happens to equal the marker text', () => {
+    const chat = { kind: 'chat' as const, updateId: 1, chatId: 42, messages: [] };
+    expect(resolveReplyText(chat, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
+      replyText: TASK_NO_UPDATE_MARKER,
+      isTaskNoUpdate: false,
+    });
+  });
+});
+
+describe('resolveReplyText — ControlTurn synthesized replies', () => {
+  it('synthesizes a success message for /compact with an empty SDK result', () => {
+    const turn = { kind: 'control' as const, updateId: 1, chatId: 42, command: '/compact' as const };
+    expect(resolveReplyText(turn, { replyText: '', ok: true }).replyText).toBe('✅ Compacted your conversation history.');
+  });
+
+  it('synthesizes a success message for /clear with an empty SDK result', () => {
+    const turn = { kind: 'control' as const, updateId: 1, chatId: 42, command: '/clear' as const };
+    expect(resolveReplyText(turn, { replyText: '', ok: true }).replyText).toBe(
+      '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.',
+    );
+  });
+
+  it('synthesizes a timeout warning when the control turn failed with no reply', () => {
+    const turn = { kind: 'control' as const, updateId: 1, chatId: 42, command: '/compact' as const };
+    expect(resolveReplyText(turn, { replyText: '', ok: false }).replyText).toBe('⚠️ /compact timed out — try again in a moment.');
+  });
+
+  it('prefers an actual SDK reply over synthesizing one', () => {
+    const turn = { kind: 'control' as const, updateId: 1, chatId: 42, command: '/compact' as const };
+    expect(resolveReplyText(turn, { replyText: 'real reply', ok: true }).replyText).toBe('real reply');
+  });
+});
+
+describe('resolveReplyText — ChatTurn', () => {
+  it('passes an empty reply straight through as empty (no synthesis for chat)', () => {
+    const turn = { kind: 'chat' as const, updateId: 1, chatId: 42, messages: [] };
+    expect(resolveReplyText(turn, { replyText: '', ok: true }).replyText).toBe('');
   });
 });
 

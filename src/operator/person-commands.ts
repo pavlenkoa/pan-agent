@@ -245,8 +245,9 @@ async function handleForgetMemory(
  * the NFS workspace mount (operator/nfs.ts), same as /memories/forget_memory
  * — no pod restart needed either way, and the SDK itself picks up filesystem
  * changes under .claude/skills/ live, mid-session, on its own (confirmed
- * against the installed SDK before relying on it). The shared `media` skill
- * is never listed or deletable here — it isn't this person's own state.
+ * against the installed SDK before relying on it). Shared skills (`media`,
+ * `esputnik-query`) are never listed or deletable here — they aren't this
+ * person's own state.
  */
 async function handleListSkills(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
   const skills = await listPersonSkills(slug);

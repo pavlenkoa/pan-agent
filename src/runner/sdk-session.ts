@@ -78,6 +78,46 @@ This is an unattended background check-in, not a live question from the person �
   return turn.messages.map((m) => (m.fromHandle ? `${m.fromHandle}: ${m.text}` : m.text)).join('\n');
 }
 
+export interface ResolvedReply {
+  /** What to actually send to Telegram — empty means "send nothing". */
+  replyText: string;
+  /** True when this was a task turn's exact `TASK_NO_UPDATE_MARKER` reply. */
+  isTaskNoUpdate: boolean;
+}
+
+/**
+ * Decides what (if anything) `index.ts`'s handleTurn should deliver to
+ * Telegram for a finished turn — pulled out of handleTurn itself so this
+ * branching (the exact source of both the no-update and the stale-reply
+ * bugs fixed on 2026-08-24) is unit-testable without spinning up the HTTP
+ * server or a session controller. Takes a minimal structural shape rather
+ * than importing `TurnResult` from session-controller.ts to avoid a
+ * circular import (session-controller.ts already imports from this file).
+ */
+export function resolveReplyText(turn: TurnRequest, result: { replyText: string; ok: boolean }): ResolvedReply {
+  const taskId = turn.kind === 'task' ? turn.taskId : null;
+  if (taskId !== null && result.replyText.trim() === TASK_NO_UPDATE_MARKER) {
+    return { replyText: '', isTaskNoUpdate: true };
+  }
+  // A successful /compact or /clear produces an empty SDK result (confirmed
+  // live: the SDK handles these as a protocol-level event, not a model
+  // turn), and session-controller.ts's control-turn timeout also resolves
+  // with an empty, ok:false result rather than throwing — synthesize a
+  // reply for both cases so the person sees *something* rather than
+  // silence either way (confirmed live: silence is exactly what made a
+  // genuinely hung /compact read as "does nothing").
+  const replyText =
+    result.replyText ||
+    (turn.kind === 'control'
+      ? result.ok
+        ? turn.command === '/compact'
+          ? '✅ Compacted your conversation history.'
+          : '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
+        : `⚠️ ${turn.command} timed out — try again in a moment.`
+      : '');
+  return { replyText, isTaskNoUpdate: false };
+}
+
 /**
  * One message pushed onto the persistent stream per turn. Chat turns with a
  * photo attachment get it inlined as real vision content; documents were

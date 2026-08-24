@@ -92,8 +92,9 @@ data:
     never see the value), then reference it in the skill by name only, e.g. `$ESPUTNIK_TOKEN` —
     exactly like the media skill already does with `$EMBY_API_KEY`.
 
-    `media` is reserved — that's the shared skill installed fresh on every restart. Never create or
-    overwrite a skill named `media`; it would just get silently clobbered on the next restart.
+    `media` and `esputnik-query` are reserved — those are shared skills installed fresh on every
+    restart. Never create or overwrite a skill under either name; it would just get silently
+    clobbered on the next restart.
 
     `/skills` and `/forget_skill` are commands the person runs directly, same as `/memories` and
     `/forget_memory` above — you never see those messages, only a `[System note: ...]` afterward if

@@ -25,7 +25,7 @@ import type { ControlRequest, ControlResponse, TurnRequest } from '../shared/typ
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { createSessionController } from './session-controller.js';
-import { TASK_NO_UPDATE_MARKER } from './sdk-session.js';
+import { resolveReplyText } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
@@ -146,31 +146,13 @@ async function main(): Promise<void> {
 
       try {
         const result = await controller.submitTurn(turn, key);
-        // A task turn's model reply of exactly TASK_NO_UPDATE_MARKER means
-        // "nothing worth telling the person" — see buildPrompt's comment on
-        // why the model can't just produce zero output instead. Suppress
-        // before it ever reaches sendTelegramReply; it's already been logged
-        // via the normal per-message SDK log regardless.
-        const taskId = turn.kind === 'task' ? turn.taskId : null;
-        const isTaskNoUpdate = taskId !== null && result.replyText.trim() === TASK_NO_UPDATE_MARKER;
-        if (isTaskNoUpdate) log.line('task_no_update', { person: cfg.slug, turn: key, taskId });
-        // A successful /compact or /clear produces an empty SDK result (confirmed
-        // live: the SDK handles these as a protocol-level event, not a model
-        // turn), and session-controller.ts's control-turn timeout also
-        // resolves with an empty, ok:false result rather than throwing —
-        // synthesize a reply for both cases so the person sees *something*
-        // rather than silence either way (confirmed live: silence is exactly
-        // what made a genuinely hung /compact read as "does nothing").
-        const replyText = isTaskNoUpdate
-          ? ''
-          : result.replyText ||
-            (turn.kind === 'control'
-              ? result.ok
-                ? turn.command === '/compact'
-                  ? '✅ Compacted your conversation history.'
-                  : '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
-                : `⚠️ ${turn.command} timed out — try again in a moment.`
-              : '');
+        const { replyText, isTaskNoUpdate } = resolveReplyText(turn, result);
+        if (isTaskNoUpdate) {
+          // Already logged via the normal per-message SDK log regardless —
+          // this just records that Telegram delivery was deliberately
+          // skipped for this turn.
+          log.line('task_no_update', { person: cfg.slug, turn: key, taskId: turn.kind === 'task' ? turn.taskId : null });
+        }
         if (replyText) {
           await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);
         }
