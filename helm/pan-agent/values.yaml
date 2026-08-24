@@ -37,7 +37,7 @@ media:
   capacity: 1Ti
 
 network:
-  transmissionNamespace: transmission
+  qbittorrentNamespace: qbittorrent
   # Emby reachability (e.g. the OrbStack host.internal range). Empty disables that egress rule.
   embyCidrs: []
   # Private ranges excluded from the pods' "allow all internet" egress rule.

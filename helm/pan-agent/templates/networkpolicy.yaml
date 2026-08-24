@@ -40,11 +40,11 @@ spec:
             - port: {{ .Values.operator.tasksApiPort | quote }}
               protocol: TCP
 
-    # 3. Transmission RPC
+    # 3. qBittorrent WebUI API
     - toEndpoints:
         - matchLabels:
-            io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name: {{ .Values.network.transmissionNamespace }}
-            app: transmission
+            io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name: {{ .Values.network.qbittorrentNamespace }}
+            app: qbittorrent
       toPorts:
         - ports:
             - port: "9091"

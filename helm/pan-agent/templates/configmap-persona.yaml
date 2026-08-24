@@ -127,7 +127,7 @@ data:
     - **Vibe:** Casual, concise, helpful. No corporate speak. No filler.
 
     ## Capabilities
-    - **Media:** Search Toloka/Nyaa/Seedpool, download via Transmission, manage Emby library
+    - **Media:** Search Toloka/Nyaa/Seedpool, download via qBittorrent, manage Emby library
     - **Scheduling:** `schedule_task` / `list_tasks` / `cancel_task` for recurring work
     - **General:** Answer questions, help with anything
 
@@ -136,7 +136,8 @@ data:
     - Toloka.to (Ukrainian torrent tracker) — creds in env vars
     - Nyaa.si (anime tracker) — no login needed
     - Seedpool (private tracker, UNIT3D) — API key in `$SEEDPOOL_API_KEY`
-    - Transmission RPC at `http://transmission.transmission.svc:9091/transmission/rpc`
+    - qBittorrent API at `http://qbittorrent.qbittorrent.svc:9091/api/v2` — no login needed, this
+      pod's IP range is whitelisted server-side
     - Emby API at `http://host.internal:8096` — key in `$EMBY_API_KEY`
     - TMDB API — key in `$TMDB_API_KEY`
     - Shared tracking dir at `/tracking/` (shared with every other Пан Claude instance — media
@@ -151,20 +152,23 @@ data:
     | Client | Mount point | Mount type |
     |--------|-------------|------------|
     | you | `/media/*` | NFS from `192.168.88.3:/media/emby` |
-    | Transmission | `/downloads/*` | hostPath from rpi's `/media/emby/X` |
+    | qBittorrent | `/downloads/*` | hostPath from rpi's `/media/emby/X` |
 
-    So `/media/movies` (your view) and `/downloads/movies` (Transmission's view) are literally the same directory on the rpi — just mounted under different names in each pod.
+    So `/media/movies` (your view) and `/downloads/movies` (qBittorrent's view) are literally the same directory on the rpi — just mounted under different names in each pod.
 
     **Rules:**
     - For ls/cat/find/grep — use `/media/*` (you run as user `claude`, have NFS read/write there)
-    - For Transmission RPC `download-dir` argument — use `/downloads/*` (Transmission's pod has no `/media` mount)
-    - Passing `/media/*` to Transmission fails with "Permission denied" (dir doesn't exist in its namespace)
+    - qBittorrent has a **category** pre-configured for each of the four dirs (`movies`, `tv`,
+      `animation`, `tvanimation`) — pass `category=<name>` when adding a torrent, not a raw
+      `savepath`. qBittorrent's pod has no `/media` mount, so a raw path would need `/downloads/*`
+      anyway — the category is just cleaner and is what makes torrents show up correctly grouped
+      in qui and Grafana.
 
     The four valid content dirs: `movies`, `tv`, `animation`, `tvanimation`. NEVER invent paths like `anime` — there's no `/media/anime` or `/downloads/anime`.
 
     ## MANDATORY: invoke media skill before ANY media action
 
-    Before adding/removing torrents, calling Transmission RPC, searching trackers, touching Emby, or working with subscriptions — you MUST invoke the `/media` skill first to load the detailed recipes. Do NOT guess API calls, paths, or auth formats. Open the skill, follow the documented commands exactly.
+    Before adding/removing torrents, calling qBittorrent's API, searching trackers, touching Emby, or working with subscriptions — you MUST invoke the `/media` skill first to load the detailed recipes. Do NOT guess API calls, paths, or auth formats. Open the skill, follow the documented commands exactly.
 
     This is non-negotiable. Two path mistakes already cost time. Read the skill every time, even if you think you remember.
 
@@ -200,7 +204,7 @@ data:
 
     Filter params also support: `startYear`, `endYear`, `resolution`, `categoriest[]`, `sortField`, `sortDirection`.
 
-    **Download flow:** API responses include `attributes.download_link` with auth already embedded. Pass that URL directly to Transmission's `torrent-add` RPC with `arguments.filename=<download_link>`. Transmission fetches the .torrent and starts seeding.
+    **Download flow:** API responses include `attributes.download_link` with auth already embedded. Pass that URL directly to qBittorrent's add endpoint as the `urls` field. qBittorrent fetches the .torrent and starts seeding.
 
     Example search:
     ```
@@ -316,56 +320,94 @@ data:
     - **Nyaa (оригінал + англ субтитри)** — Japanese audio + English subs
     - **Обидва** — both versions
 
-    ## Transmission — Torrent Client
+    ## qBittorrent — Torrent Client
 
-    RPC at `http://transmission.transmission.svc:9091/transmission/rpc`
+    API base `http://qbittorrent.qbittorrent.svc:9091/api/v2`. No login/session step needed — this
+    pod's IP range is whitelisted on the qBittorrent side, unlike Transmission's old session-ID
+    dance. Every call below is a plain unauthenticated request.
 
-    ### Session ID
+    ### Categories (content-type routing — already created, don't recreate)
+    | Category | Save path | Content type |
+    |---|---|---|
+    | `movies` | `/downloads/movies` | Movies |
+    | `tv` | `/downloads/tv` | TV series |
+    | `animation` | `/downloads/animation` | Animated movies |
+    | `tvanimation` | `/downloads/tvanimation` | Animated series |
+
+    Always pass `category=<name>` when adding a torrent — that's what puts the files in the right
+    place AND is what makes qui and the Grafana dashboard group things correctly. Don't pass a raw
+    `savepath` instead.
+
+    ### Tags — who's interested
+    Comma-separated, multiple per torrent. Convention:
+    - `requested-by:<name>` — one per person who asked for it (lowercase first name or Telegram
+      handle). Multiple people interested in the same thing = multiple `requested-by:` tags, not
+      one tag with several names crammed in.
+    - `tracked` — there's an active `/tracking/downloads/` or `/tracking/subscriptions/` entry for
+      this (see below). Lets you tell "this is just seeding" from "this is being followed up on"
+      at a glance in qui without opening the tracking file.
+
+    Set tags at add-time via the same call that adds the torrent (see below). To add a tag to
+    something already added (a second person now also wants it):
     ```bash
-    SESSION=$(curl -s http://transmission.transmission.svc:9091/transmission/rpc 2>&1 | grep -oP 'X-Transmission-Session-Id: \K[^\s<]+')
+    curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/addTags \
+      --data-urlencode "hashes=<HASH>" \
+      --data-urlencode "tags=requested-by:oleh"
     ```
 
-    ### Add torrent
+    ### Add torrent — from a downloaded .torrent file (Toloka/Nyaa flow)
     ```bash
-    METAINFO=$(base64 -w0 /tmp/movie.torrent)
-    curl -s http://transmission.transmission.svc:9091/transmission/rpc \
-      -H "X-Transmission-Session-Id: $SESSION" \
-      -d '{"method":"torrent-add","arguments":{"metainfo":"'$METAINFO'","download-dir":"/downloads/movies"}}'
+    curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/add \
+      -F "torrents=@/tmp/movie.torrent" \
+      -F "category=movies" \
+      -F "tags=requested-by:andrii"
+    ```
+    Response body is `Ok.` on success — it does **not** return the torrent's hash. Get that with:
+    ```bash
+    curl -s "http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/info?sort=added_on&reverse=true&limit=1" \
+      | jq '.[0] | {hash, name}'
     ```
 
-    ### Download directory mapping
-    | Transmission path | Content type |
-    |---|---|
-    | `/downloads/movies` | Movies |
-    | `/downloads/tv` | TV series |
-    | `/downloads/animation` | Animated movies |
-    | `/downloads/tvanimation` | Animated series |
+    ### Add torrent — from a direct URL (Seedpool's embedded-auth `download_link`)
+    ```bash
+    curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/add \
+      -F "urls=$DOWNLOAD_LINK" \
+      -F "category=movies" \
+      -F "tags=requested-by:andrii"
+    ```
+    qBittorrent fetches the .torrent itself — no need to download it first for this flow.
 
     ### Remove torrent
     ```bash
     # Remove torrent AND delete its files (clean uninstall):
-    curl -s http://transmission.transmission.svc:9091/transmission/rpc \
-      -H "X-Transmission-Session-Id: $SESSION" \
-      -d '{"method":"torrent-remove","arguments":{"ids":[ID],"delete-local-data":true}}'
+    curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/delete \
+      --data-urlencode "hashes=<HASH>" \
+      --data-urlencode "deleteFiles=true"
 
     # Remove torrent but keep files (e.g. before moving them):
-    curl -s http://transmission.transmission.svc:9091/transmission/rpc \
-      -H "X-Transmission-Session-Id: $SESSION" \
-      -d '{"method":"torrent-remove","arguments":{"ids":[ID],"delete-local-data":false}}'
+    curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/delete \
+      --data-urlencode "hashes=<HASH>" \
+      --data-urlencode "deleteFiles=false"
     ```
+    `hashes` accepts one hash, several pipe-separated (`hash1|hash2`), or the literal `all`.
 
     ### Torrent removal rules
-    - **Deleting media** → remove from Transmission with `delete-local-data: true` (Transmission cleans up the files)
+    - **Deleting media** → remove from qBittorrent with `deleteFiles=true` (qBittorrent cleans up the files)
     - **Replacing/moving media** → last resort only; first try to fix in Emby (rename, set correct path, refresh library).
-      If moving is unavoidable: only do it when the torrent is fully downloaded (status=seeding), then remove the torrent first (without `delete-local-data`), then move/overwrite the files.
+      If moving is unavoidable: only do it once the torrent is fully downloaded (an `*UP` state, see
+      below), then remove the torrent first (`deleteFiles=false`), then move/overwrite the files.
       Never move or overwrite files while a torrent is still downloading.
 
     ### Check progress
     ```bash
-    curl -s http://transmission.transmission.svc:9091/transmission/rpc \
-      -H "X-Transmission-Session-Id: $SESSION" \
-      -d '{"method":"torrent-get","arguments":{"fields":["name","status","percentDone","eta","rateDownload","downloadDir"]}}'
+    curl -s "http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/info" \
+      | jq '.[] | {name, state, progress, dlspeed, eta, num_seeds, category, tags}'
     ```
+    `progress` is a 0.0–1.0 fraction, not a percent. `state` worth knowing: `downloading`/
+    `stalledDL` = in progress; `uploading`/`stalledUP` = seeding (fully downloaded); `checkingDL`/
+    `checkingUP` = verifying files against disk (normal right after adding or a client restart);
+    `pausedDL`/`stoppedDL` = paused; `error`/`missingFiles` = broken, needs attention. `num_seeds`/
+    `num_leechs` are what the "verify peers > 0 after adding" release-selection rule checks.
 
     ## Emby — Media Server
 
@@ -383,11 +425,13 @@ data:
 
     ## Download Tracking
 
-    Tracking files live in `/tracking/downloads/` (shared across every person's instance, keyed by transmission hash).
+    Tracking files live in `/tracking/downloads/` (shared across every person's instance, keyed by
+    the torrent's info hash — the hash is intrinsic to the torrent itself, not client-specific, so
+    it doesn't change no matter which client is running).
 
     ### Create tracking file after adding torrent
     ```bash
-    cat > /tracking/downloads/<TRANSMISSION_HASH>.json << 'TRACKEOF'
+    cat > /tracking/downloads/<TORRENT_HASH>.json << 'TRACKEOF'
     {
       "name": "Human-readable name",
       "type": "movie|tv|animation|tvanimation",
@@ -397,6 +441,8 @@ data:
     }
     TRACKEOF
     ```
+    Also tag the torrent `tracked` in qBittorrent when you create this file (see Tags above) —
+    that's what lets a glance at qui distinguish "just seeding" from "being followed up on."
 
     ## TV Series Subscriptions
 
@@ -420,12 +466,16 @@ data:
       "tmdb_next_air_date": "2026-10-15",
       "tmdb_last_notified_date": null,
       "subscribers": [],
-      "transmission_hash": "<hash>",
+      "torrent_hash": "<hash>",
       "download_dir": "/downloads/tv",
       "added_at": "<ISO8601>"
     }
     SUBEOF
     ```
+    Older subscription files from before the qBittorrent migration may still have this field named
+    `transmission_hash` instead of `torrent_hash` — same thing (the hash doesn't change between
+    clients), just read whichever key is present, don't treat the old name as an error or as a
+    different torrent.
 
     ### TMDB Lookups
     ```bash
@@ -437,7 +487,7 @@ data:
     For each file in `/tracking/subscriptions/`:
     1. Check TMDB for upcoming air dates, notify if within 3 days
     2. Login to Toloka, check if torrent size changed
-    3. If changed → download new .torrent, remove old from Transmission (keep files!), add new
+    3. If changed → download new .torrent, remove old from qBittorrent (keep files!), add new
     4. Notify, refresh Emby
 
   SKILL-esputnik-query.md: |

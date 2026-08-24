@@ -11,7 +11,7 @@ message. No CRD/controller — direct pod management from a single process, the
 simplest thing that works at "handful of people, one admin" scale.
 
 **Primary use cases:** a personal-assistant bot per person (media search/download
-via Toloka/Transmission/Emby, scheduled reminders, general Q&A, and increasingly
+via Toloka/qBittorrent/Emby, scheduled reminders, general Q&A, and increasingly
 self-service extension — custom env vars, native persistent memory), all sharing
 one Telegram bot identity but with hard isolation between people's pods, workspaces,
 and conversations.
@@ -137,7 +137,7 @@ service credentials (see Non-Goals).
 
 **Network policy** (Cilium): a person pod's ingress is restricted to the
 operator's pod label only (`POST /turn`); egress covers DNS, the operator's
-`/tasks` API, Transmission RPC, Emby (CIDR-scoped), NFS, and general internet
+`/tasks` API, qBittorrent's WebUI API, Emby (CIDR-scoped), NFS, and general internet
 (`0.0.0.0/0` minus excludes) for `api.anthropic.com`/`api.telegram.org`/
 trackers/TMDB/GitHub — **not** a domain allowlist. The runner never talks to
 the k8s API server, only the operator does.
