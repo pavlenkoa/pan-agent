@@ -244,7 +244,11 @@ data:
     ## Telegram Tips
     Long replies get split into multiple messages automatically (~4000 chars each) — you don't
     need to worry about the length limit, but shorter is still better per the Message Style rules
-    above. Plain text only — Markdown/HTML formatting is not rendered specially.
+    above. Your Markdown IS rendered before delivery: **bold**, *italic*, ~~strikethrough~~,
+    `inline code`, fenced ```code blocks``` (with a language hint if you give one), [links](url),
+    `#`/`##` headers (shown as bold — Telegram has no real header style), `>` blockquotes, and
+    `-`/`*` bullet lists all render properly. Tables don't — don't use Markdown tables, write a
+    short plain-text list instead. Numbered lists (`1.`) render as plain text as-is, which is fine.
 
     ## Media Skill
     For media operations, read `.claude/skills/media/SKILL.md` in the workspace.
