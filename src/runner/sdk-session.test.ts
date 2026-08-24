@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { turnKey } from '../shared/types.js';
-import { buildPrompt } from './sdk-session.js';
+import { buildPrompt, TASK_NO_UPDATE_MARKER } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
   it('returns the bare command with no prefix, regardless of chatId', () => {
@@ -33,6 +33,21 @@ describe('buildPrompt — ChatTurn (regression guard)', () => {
       messages: [{ messageId: 1, text: 'hello', fromHandle: null, date: '2026-08-23T00:00:00Z' }],
     });
     expect(prompt).toBe('hello');
+  });
+});
+
+describe('buildPrompt — TaskTurn', () => {
+  it('includes the task prompt and instructs the no-update marker', () => {
+    const prompt = buildPrompt({
+      kind: 'task',
+      taskId: 'task-1',
+      scheduledFor: '2026-08-24T09:00:00Z',
+      chatId: 42,
+      prompt: 'Check if Silo has new episodes.',
+    });
+    expect(prompt).toContain('[Scheduled task task-1, due 2026-08-24T09:00:00Z]');
+    expect(prompt).toContain('Check if Silo has new episodes.');
+    expect(prompt).toContain(TASK_NO_UPDATE_MARKER);
   });
 });
 

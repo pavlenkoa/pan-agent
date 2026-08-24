@@ -42,9 +42,31 @@ export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promi
   await writeFile(cfg.sessionIdFile, sessionId, 'utf8');
 }
 
+/**
+ * Confirmed live 2026-08-24: the `claude` CLI itself (not the SDK, not
+ * anything in this repo) hardcodes a nudge — "Your previous response had no
+ * visible output. Please continue and produce a user-visible response." —
+ * injected whenever a turn ends with no visible text, e.g. after a
+ * background cron check that finds nothing new. There's no SDK option to
+ * disable it; a model that tries to genuinely say nothing gets forced into
+ * saying *something* anyway (which then went straight to Telegram, so a
+ * "no news" cron check produced a "I'm staying silent" message — visibly
+ * contradictory, and the actual bug reported). Since real silence isn't
+ * achievable at the model layer, this gives the model a real, non-empty
+ * response that still satisfies the CLI's requirement but that our own
+ * layer (`index.ts`'s handleTurn) recognizes and swallows before it reaches
+ * Telegram — logged via the normal SDK-message log either way, just not
+ * delivered. Same "app-enforced, not SDK-trusted" pattern as the context
+ * limit.
+ */
+export const TASK_NO_UPDATE_MARKER = 'NO_UPDATE';
+
 export function buildPrompt(turn: TurnRequest): string {
   if (turn.kind === 'task') {
-    return `[Scheduled task ${turn.taskId}, due ${turn.scheduledFor}]\n${turn.prompt}`;
+    return `[Scheduled task ${turn.taskId}, due ${turn.scheduledFor}]
+${turn.prompt}
+
+This is an unattended background check-in, not a live question from the person — they won't see anything unless you tell them something. If there is genuinely nothing worth reporting (no change, no news), reply with exactly the single line ${TASK_NO_UPDATE_MARKER} and nothing else; that suppresses the Telegram message entirely while still being logged. Only write a real message when there's something they'd actually want to know.`;
   }
   if (turn.kind === 'control') {
     // Must be the bare command with nothing else in the message — confirmed

@@ -237,6 +237,26 @@ stdout to your log backend picks it up like any other pod.
   (`shared/types.ts`) that carries the bare text through the same `/turn`
   delivery path (journal dedup, busy/retry) without the prefix — don't route
   either command through `enqueueChatMessage`.
+- **The `claude` CLI forces visible output on every turn — true silence
+  isn't achievable, so "say nothing" has to be app-enforced.** Confirmed
+  live 2026-08-24 (found by grepping the compiled `claude` binary, not
+  anything in this repo or the SDK): whenever a turn ends with no visible
+  text, the CLI itself hardcodes an injected nudge — "Your previous response
+  had no visible output. Please continue and produce a user-visible
+  response." — forcing the model to say *something*. This bit a scheduled
+  cron check-in (a task-kind turn with nothing new to report): the model's
+  attempt at silence got overridden into a message that announced it was
+  staying silent while, contradictorily, sending exactly that as the
+  message. Since the model can never truly produce zero output, `buildPrompt`
+  (`sdk-session.ts`) instead gives task-kind turns a real, satisfiable
+  escape hatch — reply with exactly `TASK_NO_UPDATE_MARKER` ("NO_UPDATE")
+  and nothing else when there's nothing worth reporting — and `index.ts`'s
+  `handleTurn` recognizes that exact reply and swallows it before
+  `sendTelegramReply`, never delivering it. Still logged via the normal
+  per-message SDK log either way (`task_no_update` line), so nothing about
+  a "silent" check is actually invisible — only the Telegram delivery is
+  suppressed. Same "app-enforced, not SDK-trusted" shape as the context
+  limit above.
 - **Shared skills: one `SKILL-<name>.md` ConfigMap key per skill, not
   hardcoded to `media`.** `runner/index.ts`'s `installPersonaFiles` installs
   every `SKILL-<name>.md` key in the persona ConfigMap as
