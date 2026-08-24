@@ -81,8 +81,36 @@ This is an unattended background check-in, not a live question from the person �
 export interface ResolvedReply {
   /** What to actually send to Telegram — empty means "send nothing". */
   replyText: string;
-  /** True when this was a task turn's exact `TASK_NO_UPDATE_MARKER` reply. */
+  /** True when this was a task turn's `TASK_NO_UPDATE_MARKER` reply. */
   isTaskNoUpdate: boolean;
+  /**
+   * The task turn's reply with its trailing `TASK_NO_UPDATE_MARKER` line
+   * removed — populated only when `isTaskNoUpdate` is true, empty otherwise.
+   * This is the reasoning the model wrote before deciding to stay silent;
+   * `index.ts` logs it on `reply_muted` so a "why did the cron stay quiet"
+   * question is answerable from Loki instead of just "(no message sent)".
+   */
+  suppressedReasoning: string;
+}
+
+/**
+ * A task turn's `TASK_NO_UPDATE_MARKER` reply is only recognized on its own
+ * trailing line — the model sometimes prepends genuine reasoning before it
+ * (confirmed live: "Still only TELESYNC/HDTS cam-rips, no real upgrade.\n\n
+ * NO_UPDATE"), and an exact `trim() === MARKER` match misses that case
+ * entirely, delivering the literal marker text to Telegram despite the task
+ * asking to stay silent. Trims each line individually (not just the whole
+ * string) so a trailing blank line or trailing spaces on the marker's own
+ * line don't defeat the match either.
+ */
+function stripTrailingNoUpdateMarker(text: string): { isMarker: boolean; reasoning: string } {
+  const lines = text.split('\n');
+  let lastIdx = lines.length - 1;
+  while (lastIdx >= 0 && lines[lastIdx]!.trim() === '') lastIdx -= 1;
+  if (lastIdx < 0 || lines[lastIdx]!.trim() !== TASK_NO_UPDATE_MARKER) {
+    return { isMarker: false, reasoning: '' };
+  }
+  return { isMarker: true, reasoning: lines.slice(0, lastIdx).join('\n').trim() };
 }
 
 /**
@@ -96,8 +124,11 @@ export interface ResolvedReply {
  */
 export function resolveReplyText(turn: TurnRequest, result: { replyText: string; ok: boolean }): ResolvedReply {
   const taskId = turn.kind === 'task' ? turn.taskId : null;
-  if (taskId !== null && result.replyText.trim() === TASK_NO_UPDATE_MARKER) {
-    return { replyText: '', isTaskNoUpdate: true };
+  if (taskId !== null) {
+    const { isMarker, reasoning } = stripTrailingNoUpdateMarker(result.replyText);
+    if (isMarker) {
+      return { replyText: '', isTaskNoUpdate: true, suppressedReasoning: reasoning };
+    }
   }
   // A successful /compact or /clear produces an empty SDK result (confirmed
   // live: the SDK handles these as a protocol-level event, not a model
@@ -115,7 +146,7 @@ export function resolveReplyText(turn: TurnRequest, result: { replyText: string;
           : '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
         : `⚠️ ${turn.command} timed out — try again in a moment.`
       : '');
-  return { replyText, isTaskNoUpdate: false };
+  return { replyText, isTaskNoUpdate: false, suppressedReasoning: '' };
 }
 
 /**

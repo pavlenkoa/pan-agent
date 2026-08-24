@@ -20,7 +20,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { readJsonBody, sendJson } from '../shared/http.js';
-import { log } from '../shared/log.js';
+import { log, truncateText } from '../shared/log.js';
 import type { ControlRequest, ControlResponse, TurnRequest } from '../shared/types.js';
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
@@ -146,17 +146,53 @@ async function main(): Promise<void> {
 
       try {
         const result = await controller.submitTurn(turn, key);
-        const { replyText, isTaskNoUpdate } = resolveReplyText(turn, result);
-        if (isTaskNoUpdate) {
-          // Already logged via the normal per-message SDK log regardless —
-          // this just records that Telegram delivery was deliberately
-          // skipped for this turn.
-          log.line('task_no_update', { person: cfg.slug, turn: key, taskId: turn.kind === 'task' ? turn.taskId : null });
+        const { replyText, isTaskNoUpdate, suppressedReasoning } = resolveReplyText(turn, result);
+
+        // Delivery is wrapped in its own try/catch (not the outer one) so a
+        // failed sendTelegramReply still falls through to the turn_end log
+        // below instead of skipping it entirely — see CLAUDE.md's "Error
+        // path — mandatory" note: moving turn_end out of finishCurrentJob()
+        // means it's no longer unconditional, and a job that resolved but
+        // then failed to deliver must not end up with no turn_end at all.
+        let deliveryOk = true;
+        let deliveryError: string | undefined;
+        try {
+          if (replyText) {
+            const { text, bytes } = truncateText(replyText);
+            log.line('reply_sent', { person: cfg.slug, turn: key, text, bytes });
+            await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);
+          } else {
+            const { text, bytes } = truncateText(isTaskNoUpdate ? suppressedReasoning : '');
+            log.line('reply_muted', {
+              person: cfg.slug,
+              turn: key,
+              reason: isTaskNoUpdate ? 'task_no_update' : 'empty',
+              text,
+              bytes,
+            });
+          }
+        } catch (err) {
+          deliveryOk = false;
+          deliveryError = err instanceof Error ? err.message : String(err);
+          log.error('reply_delivery_failed', err, { person: cfg.slug, turn: key });
+        } finally {
+          // submitTurn's job is always trigger:'http' (see session-controller.ts's
+          // finishCurrentJob/timeoutControlTurn) — turnEnd is always populated here.
+          const turnEnd = result.turnEnd!;
+          log.line('turn_end', {
+            person: cfg.slug,
+            turn: key,
+            trigger: turnEnd.trigger,
+            ok: result.ok && deliveryOk,
+            dur_ms: turnEnd.durMs,
+            cost_usd: turnEnd.costUsd,
+            turns: turnEnd.turns,
+            ...(turnEnd.usage ?? {}),
+            ...(deliveryError ? { error: deliveryError } : {}),
+          });
         }
-        if (replyText) {
-          await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);
-        }
-        await journal.complete(key, result.ok ? 'ok' : 'error');
+
+        await journal.complete(key, result.ok && deliveryOk ? 'ok' : 'error');
       } catch (err) {
         log.error('turn_processing_failed', err, { person: cfg.slug, turn: key });
         await journal.complete(key, 'error');

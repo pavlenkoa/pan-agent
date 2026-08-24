@@ -54,17 +54,49 @@ describe('buildPrompt — TaskTurn', () => {
 describe('resolveReplyText — TaskTurn no-update suppression', () => {
   const task = { kind: 'task' as const, taskId: 'task-1', scheduledFor: '2026-08-24T09:00:00Z', chatId: 42, prompt: 'check' };
 
-  it('suppresses delivery on an exact TASK_NO_UPDATE_MARKER reply', () => {
+  it('suppresses delivery on a bare TASK_NO_UPDATE_MARKER reply', () => {
     expect(resolveReplyText(task, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
       replyText: '',
       isTaskNoUpdate: true,
+      suppressedReasoning: '',
     });
   });
 
   it('still suppresses when the marker has surrounding whitespace', () => {
-    expect(resolveReplyText(task, { replyText: `  ${TASK_NO_UPDATE_MARKER}\n`, ok: true })).toEqual({
+    expect(resolveReplyText(task, { replyText: `  ${TASK_NO_UPDATE_MARKER}  `, ok: true })).toEqual({
       replyText: '',
       isTaskNoUpdate: true,
+      suppressedReasoning: '',
+    });
+  });
+
+  it('suppresses when the marker sits on its own trailing line after reasoning, preserving the reasoning', () => {
+    // Confirmed live: the model sometimes prepends reasoning before the bare
+    // marker line — an exact `trim() === MARKER` match misses this entirely
+    // and delivers the literal marker text to Telegram.
+    const reasoning = 'Still only TELESYNC/HDTS cam-rips, no real upgrade.';
+    expect(resolveReplyText(task, { replyText: `${reasoning}\n\n${TASK_NO_UPDATE_MARKER}`, ok: true })).toEqual({
+      replyText: '',
+      isTaskNoUpdate: true,
+      suppressedReasoning: reasoning,
+    });
+  });
+
+  it('suppresses when the marker line has trailing spaces and a trailing newline', () => {
+    const reasoning = 'checking tomorrow instead';
+    expect(resolveReplyText(task, { replyText: `${reasoning}\n${TASK_NO_UPDATE_MARKER} \n`, ok: true })).toEqual({
+      replyText: '',
+      isTaskNoUpdate: true,
+      suppressedReasoning: reasoning,
+    });
+  });
+
+  it('does NOT suppress when the marker is not on its own trailing line', () => {
+    const replyText = `${TASK_NO_UPDATE_MARKER} available yet, still checking tomorrow`;
+    expect(resolveReplyText(task, { replyText, ok: true })).toEqual({
+      replyText,
+      isTaskNoUpdate: false,
+      suppressedReasoning: '',
     });
   });
 
@@ -72,6 +104,7 @@ describe('resolveReplyText — TaskTurn no-update suppression', () => {
     expect(resolveReplyText(task, { replyText: 'нова серія вийшла!', ok: true })).toEqual({
       replyText: 'нова серія вийшла!',
       isTaskNoUpdate: false,
+      suppressedReasoning: '',
     });
   });
 
@@ -80,6 +113,7 @@ describe('resolveReplyText — TaskTurn no-update suppression', () => {
     expect(resolveReplyText(chat, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
       replyText: TASK_NO_UPDATE_MARKER,
       isTaskNoUpdate: false,
+      suppressedReasoning: '',
     });
   });
 });

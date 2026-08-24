@@ -30,9 +30,29 @@ import {
 import { sendTelegramReply } from './telegram-send.js';
 import { createPushableQueue } from './pushable-queue.js';
 
+/**
+ * Everything `evt="turn_end"` logs besides `person`/`turn` (which the caller
+ * already has). Only populated for `trigger: 'http'` jobs — those are the
+ * ones `index.ts`'s handleTurn drives, and it logs `turn_end` itself
+ * *after* `reply_sent`/`reply_muted` (see `finishCurrentJob`'s comment for
+ * why: logging it here, before control returns to handleTurn, is what made
+ * the summary row render above the reply row). `task_notification` and
+ * `auto_compact` jobs never flow through handleTurn, have no ordering
+ * problem, and keep logging `turn_end` unconditionally inside
+ * `finishCurrentJob` — their `TurnResult` never carries this field.
+ */
+export interface TurnEndFields {
+  trigger: Job['trigger'];
+  durMs: number;
+  costUsd: number;
+  turns: number;
+  usage: ReturnType<typeof summarizeUsage>;
+}
+
 export interface TurnResult {
   replyText: string;
   ok: boolean;
+  turnEnd?: TurnEndFields;
 }
 
 export interface SessionController {
@@ -152,7 +172,13 @@ export function createSessionController(
       turn: turnId,
       trigger: job.trigger,
     });
-    job.resolve({ replyText: '', ok: false });
+    job.resolve({
+      replyText: '',
+      ok: false,
+      ...(job.trigger === 'http'
+        ? { turnEnd: { trigger: job.trigger, durMs: Date.now() - job.startedAt, costUsd: job.costUsd, turns: job.numTurns, usage: job.usage } }
+        : {}),
+    });
     drainReactionQueue();
     // try/catch, not just .catch() on the returned promise — interrupt()
     // isn't guaranteed to exist as a real function on every Query-shaped
@@ -186,17 +212,27 @@ export function createSessionController(
     if (!job) return;
     currentJob = null;
     consecutiveCrashes = 0; // genuine forward progress — reset the crash-retry budget
-    log.line('turn_end', {
-      person: cfg.slug,
-      turn: job.turnId,
-      trigger: job.trigger,
-      ok: job.ok,
-      dur_ms: Date.now() - job.startedAt,
-      cost_usd: job.costUsd,
-      turns: job.numTurns,
-      ...job.usage,
-    });
-    job.resolve({ replyText: job.replyText, ok: job.ok });
+    const durMs = Date.now() - job.startedAt;
+    if (job.trigger === 'http') {
+      // index.ts logs turn_end itself, after reply_sent/reply_muted — see TurnEndFields' comment.
+      job.resolve({
+        replyText: job.replyText,
+        ok: job.ok,
+        turnEnd: { trigger: job.trigger, durMs, costUsd: job.costUsd, turns: job.numTurns, usage: job.usage },
+      });
+    } else {
+      log.line('turn_end', {
+        person: cfg.slug,
+        turn: job.turnId,
+        trigger: job.trigger,
+        ok: job.ok,
+        dur_ms: durMs,
+        cost_usd: job.costUsd,
+        turns: job.numTurns,
+        ...job.usage,
+      });
+      job.resolve({ replyText: job.replyText, ok: job.ok });
+    }
     drainReactionQueue();
     maybeTriggerAutoCompact(job);
   }
@@ -222,6 +258,8 @@ export function createSessionController(
     try {
       const result = await startJob('task_notification', turnId, message);
       if (result.replyText.trim()) {
+        const { text, bytes } = truncateText(result.replyText);
+        log.line('reply_sent', { person: cfg.slug, turn: turnId, text, bytes });
         await sendTelegramReply(cfg.telegramBotToken, cfg.chatId, result.replyText);
       }
     } catch (err) {
@@ -274,13 +312,11 @@ export function createSessionController(
     try {
       const result = await startJob('auto_compact', turnId, message);
       log.line('auto_compact_triggered', { person: cfg.slug, totalTokens, contextLimit, ok: result.ok });
-      await sendTelegramReply(
-        cfg.telegramBotToken,
-        cfg.chatId,
-        result.ok
-          ? `✅ Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`
-          : `⚠️ Auto-compact timed out — context is still over your ${contextLimit.toLocaleString()}-token limit, will retry after your next message.`,
-      );
+      const notice = result.ok
+        ? `✅ Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`
+        : `⚠️ Auto-compact timed out — context is still over your ${contextLimit.toLocaleString()}-token limit, will retry after your next message.`;
+      log.line('system_notice', { person: cfg.slug, turn: turnId, text: notice });
+      await sendTelegramReply(cfg.telegramBotToken, cfg.chatId, notice);
     } catch (err) {
       log.error('auto_compact_failed', err, { person: cfg.slug });
     } finally {

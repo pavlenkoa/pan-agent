@@ -73,6 +73,18 @@ async function flushMicrotasks(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Every result submitTurn() resolves with now carries `turnEnd` (the job is
+ * always trigger:'http' by construction — see session-controller.ts's
+ * finishCurrentJob/timeoutControlTurn). `durMs` is real wall-clock elapsed
+ * time, so it's matched loosely; the rest reflects the fake `resultMessage`
+ * defaults (num_turns: 1, total_cost_usd: 0, modelUsage: {} -> usage: null)
+ * unless a test overrides them.
+ */
+function httpTurnEnd(overrides: Partial<{ turns: number; costUsd: number; usage: unknown }> = {}) {
+  return { trigger: 'http' as const, durMs: expect.any(Number), costUsd: 0, turns: 1, usage: null, ...overrides };
+}
+
 describe('createSessionController', () => {
   let dir: string;
   let cfg: RunnerConfig;
@@ -137,7 +149,7 @@ describe('createSessionController', () => {
 
     fakeEvents.push(resultMessage('hello there'));
 
-    await expect(turnPromise).resolves.toEqual({ replyText: 'hello there', ok: true });
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hello there', ok: true, turnEnd: httpTurnEnd() });
     expect(controller.isBusy()).toBe(false);
   });
 
@@ -190,7 +202,7 @@ describe('createSessionController', () => {
     expect(sendTelegramReply).not.toHaveBeenCalled(); // queued, not started yet
 
     fakeEvents.push(resultMessage('main reply'));
-    await expect(turnPromise).resolves.toEqual({ replyText: 'main reply', ok: true });
+    await expect(turnPromise).resolves.toEqual({ replyText: 'main reply', ok: true, turnEnd: httpTurnEnd() });
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true)); // reaction started right after
 
     fakeEvents.push(resultMessage('reaction reply'));
@@ -229,7 +241,7 @@ describe('createSessionController', () => {
     const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
     fakeEvents.push(resultMessage('hi back'));
-    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true, turnEnd: httpTurnEnd() });
 
     // No external submitTurn call here — this job has to start on its own.
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
@@ -262,7 +274,7 @@ describe('createSessionController', () => {
     const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
     fakeEvents.push(resultMessage('hi back'));
-    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true, turnEnd: httpTurnEnd() });
 
     await flushMicrotasks();
     expect(controller.isBusy()).toBe(false);
@@ -286,7 +298,7 @@ describe('createSessionController', () => {
     const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
     fakeEvents.push(resultMessage('hi back'));
-    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true });
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true, turnEnd: httpTurnEnd() });
 
     // Auto-compact starts on its own — while it's in flight, simulate a real
     // turn arriving (what index.ts would normally block via isBusy(), but
@@ -318,7 +330,7 @@ describe('createSessionController', () => {
     const turnPromise = controller.submitTurn(controlTurn, 'ctl-1');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
 
-    await expect(turnPromise).resolves.toEqual({ replyText: '', ok: false });
+    await expect(turnPromise).resolves.toEqual({ replyText: '', ok: false, turnEnd: httpTurnEnd({ turns: 0 }) });
     expect(controller.isBusy()).toBe(false);
 
     // The queue must be usable again — this is the actual bug: without the
@@ -326,7 +338,7 @@ describe('createSessionController', () => {
     const nextTurn = controller.submitTurn(chatTurn, 'turn-2');
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
     fakeEvents.push(resultMessage('back to normal'));
-    await expect(nextTurn).resolves.toEqual({ replyText: 'back to normal', ok: true });
+    await expect(nextTurn).resolves.toEqual({ replyText: 'back to normal', ok: true, turnEnd: httpTurnEnd() });
   });
 
   it('a queryFn that throws rejects the in-flight job instead of hanging', async () => {
