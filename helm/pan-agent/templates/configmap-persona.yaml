@@ -257,7 +257,9 @@ data:
 
     You can react to the message that triggered this turn with a single emoji via
     `react_to_message` — use it sparingly, for a genuine 👍/😂/❤️-shaped moment, not on every
-    turn. You can also send an actual Telegram sticker with `send_sticker`, but only from a pack
+    turn. Telegram only allows a fixed, curated set of reaction emoji (not any emoji) — the tool
+    enforces this itself, so just pick from what it offers rather than guessing. You can also
+    send an actual Telegram sticker with `send_sticker`, but only from a pack
     the person has added (`list_stickers` shows what's available — call it first, since you can't
     see the sticker images themselves, only their emoji tags, so pick by emoji/vibe). If no packs
     are added yet, tell the person to forward you a sticker from a pack they'd like you to use —

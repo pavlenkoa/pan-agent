@@ -21,6 +21,26 @@ export interface ReactableMessageRef {
   messageId: number | null;
 }
 
+/**
+ * Telegram reactions are NOT arbitrary emoji — `setMessageReaction`'s
+ * `ReactionTypeEmoji.emoji` only accepts this fixed, curated set (confirmed
+ * 2026-08-26 against grammyjs/types' generated Bot API type, which mirrors
+ * Telegram's own schema — core.telegram.org/bots/api itself documents the
+ * *existence* of the constraint but doesn't enumerate it). Telegram's own
+ * doc comment phrases it as "currently, it can be one of" — this set has
+ * grown before and may again, so this isn't guaranteed permanent, but there
+ * is no live/discoverable way to fetch the current set from the Bot API
+ * itself. Enforced client-side via zod so a bad guess fails instantly
+ * instead of round-tripping to Telegram for the same 400.
+ */
+const REACTION_EMOJI = [
+  '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢', '🎉', '🤩', '🤮', '💩',
+  '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳', '❤‍🔥', '🌚', '🌭', '💯', '🤣', '⚡', '🍌', '🏆',
+  '💔', '🤨', '😐', '🍓', '🍾', '💋', '🖕', '😈', '😴', '😭', '🤓', '👻', '👨‍💻', '👀', '🎃', '🙈',
+  '😇', '😨', '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿', '🆒', '💘', '🙉', '🦄',
+  '😘', '💊', '🙊', '😎', '👾', '🤷‍♂', '🤷', '🤷‍♀', '😡',
+] as const;
+
 export function buildTelegramExtrasMcpServer(cfg: RunnerConfig, reactable: ReactableMessageRef) {
   const listStickers = tool(
     'list_stickers',
@@ -61,9 +81,10 @@ export function buildTelegramExtrasMcpServer(cfg: RunnerConfig, reactable: React
 
   const reactToMessage = tool(
     'react_to_message',
-    'React to the message the person just sent, with a single emoji (e.g. 👍, 😂, ❤️) — a real Telegram reaction ' +
-      'on their message, not a reply message. Only works for the message that triggered this turn.',
-    { emoji: z.string().describe('A single emoji, e.g. 👍') },
+    'React to the message the person just sent, with a single emoji — a real Telegram reaction on their message, ' +
+      'not a reply message. Only works for the message that triggered this turn. Telegram only allows a fixed set ' +
+      'of reaction emoji (not arbitrary ones) — pick from the enum, not from what would otherwise fit best.',
+    { emoji: z.enum(REACTION_EMOJI).describe('One of Telegram\'s fixed reaction emoji') },
     async (args) => {
       if (reactable.messageId === null) {
         return { content: [{ type: 'text' as const, text: 'No message to react to right now.' }], isError: true };
