@@ -46,6 +46,13 @@ export interface TelegramReplyToMessage {
   caption?: string;
 }
 
+/** The specific substring the person selected before replying (Bot API 7.0+) — absent when they replied without selecting anything, in which case `reply_to_message`'s own text is the best we have. */
+export interface TelegramTextQuote {
+  text: string;
+  position: number;
+  is_manual?: boolean;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramFrom;
@@ -58,6 +65,8 @@ export interface TelegramMessage {
   sticker?: TelegramSticker;
   /** Present when the person used Telegram's native "reply" swipe/long-press on an earlier message (theirs, the bot's, or a third party's in principle — this bot is DM-only so in practice always one of the first two). */
   reply_to_message?: TelegramReplyToMessage;
+  /** The exact substring selected before replying, if any — see TelegramTextQuote's doc comment. Sibling of reply_to_message, not nested under it. */
+  quote?: TelegramTextQuote;
 }
 
 export interface TelegramUpdate {

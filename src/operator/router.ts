@@ -36,11 +36,18 @@ function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined 
 // to in its own conversation history if it's recent).
 const REPLY_SNIPPET_MAX_LEN = 300;
 
-/** Telegram's native "reply" swipe/long-press — absent for an ordinary (non-reply) message. */
+/**
+ * Telegram's native "reply" swipe/long-press — absent for an ordinary
+ * (non-reply) message. Prefers `msg.quote` (Bot API 7.0+'s `TextQuote`,
+ * confirmed live 2026-08-26 it's a sibling of `reply_to_message`, not
+ * nested under it) when the person selected a specific substring before
+ * replying — that's exactly what they meant to point at, more precise than
+ * falling back to the *whole* original message's text.
+ */
 function extractReplyTo(msg: TelegramMessage): ChatReplyTo | undefined {
   const r = msg.reply_to_message;
   if (!r) return undefined;
-  const raw = r.text ?? r.caption ?? '';
+  const raw = msg.quote?.text ?? r.text ?? r.caption ?? '';
   const snippet = raw.length > REPLY_SNIPPET_MAX_LEN ? `${raw.slice(0, REPLY_SNIPPET_MAX_LEN)}…` : raw;
   return { messageId: r.message_id, snippet, fromHandle: r.from?.username ? `@${r.from.username}` : null };
 }
