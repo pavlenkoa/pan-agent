@@ -205,8 +205,12 @@ describe('personaChangedSinceLastAck', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns false on the very first check — no prior hash to compare, a fresh session needs no nudge', async () => {
-    expect(await personaChangedSinceLastAck(cfg, 'content v1')).toBe(false);
+  it('returns true on the very first check — no prior hash means it cannot vouch the content is unchanged', async () => {
+    // Deliberately conservative: whether a nudge actually fires for this is
+    // index.ts's call (it separately gates on whether the session was
+    // resuming) — this function must not assume "brand new person" on a
+    // caller's behalf just because it has never hash-checked before.
+    expect(await personaChangedSinceLastAck(cfg, 'content v1')).toBe(true);
   });
 
   it('returns false when content is unchanged since the last check', async () => {

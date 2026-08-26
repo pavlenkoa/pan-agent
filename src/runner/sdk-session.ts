@@ -59,9 +59,18 @@ export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promi
  * itself (session-controller.ts's `nudgePersonaRefresh`) — this function
  * just decides *when* that's worth doing: compares the freshly-installed
  * content's hash against the hash last acknowledged, persisted on the same
- * NFS mount so it survives restarts. Returns false on a person's very first
- * ever boot (no prior hash to compare) since a brand new session reads
- * CLAUDE.md naturally and needs no nudge.
+ * NFS mount so it survives restarts. No prior hash file counts as "changed"
+ * (conservative default) rather than "first boot, skip" — confirmed live
+ * 2026-08-26 that the naive version of this got that backwards: this
+ * function's own first-ever run (the day this mechanism shipped) hit
+ * exactly that branch for four people whose sessions were already resumed
+ * and had already missed several real persona changes earlier that same
+ * day, and the "no prior hash = unchanged" default silently skipped
+ * nudging every one of them. Whether a genuinely brand-new person's first
+ * boot needs a nudge at all is `index.ts`'s call (it gates on
+ * `readSavedSessionId` separately) — this function has no way to tell "new
+ * person" from "resumed session, never hash-checked before" apart, so it
+ * must not assume "no nudge" on their behalf.
  */
 export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentContent: string): Promise<boolean> {
   const ackPath = path.join(cfg.claudeHome, 'pan-agent-persona-hash');
@@ -74,7 +83,7 @@ export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentConte
     prevHash = null;
   }
   await writeFile(ackPath, hash, 'utf8');
-  return prevHash !== null && prevHash !== hash;
+  return prevHash !== hash;
 }
 
 /**
