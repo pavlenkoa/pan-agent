@@ -4,7 +4,7 @@
  * denied -> dropped silently. Admin DMs starting with a recognized command
  * are intercepted first.
  */
-import type { ChatAttachment, PersonIndexEntry } from '../shared/types.js';
+import type { ChatAttachment, ChatReplyTo, PersonIndexEntry } from '../shared/types.js';
 import { log } from '../shared/log.js';
 import { tryHandleAdminCommand } from './admin-commands.js';
 import { enqueueChatMessage } from './delivery.js';
@@ -29,6 +29,20 @@ function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined 
     });
   }
   return attachments.length > 0 ? attachments : undefined;
+}
+
+// Keeps a quoted reply short — this is context for the model, not a full
+// transcript of the original message (which it can still ask about/scroll
+// to in its own conversation history if it's recent).
+const REPLY_SNIPPET_MAX_LEN = 300;
+
+/** Telegram's native "reply" swipe/long-press — absent for an ordinary (non-reply) message. */
+function extractReplyTo(msg: TelegramMessage): ChatReplyTo | undefined {
+  const r = msg.reply_to_message;
+  if (!r) return undefined;
+  const raw = r.text ?? r.caption ?? '';
+  const snippet = raw.length > REPLY_SNIPPET_MAX_LEN ? `${raw.slice(0, REPLY_SNIPPET_MAX_LEN)}…` : raw;
+  return { messageId: r.message_id, snippet, fromHandle: r.from?.username ? `@${r.from.username}` : null };
 }
 
 /**
@@ -96,6 +110,7 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
     fromHandle: msg.from.username ? `@${msg.from.username}` : null,
     date: new Date(msg.date * 1000).toISOString(),
     attachments: extractAttachments(msg),
+    replyTo: extractReplyTo(msg),
   });
 }
 
@@ -151,6 +166,7 @@ async function autoApprove(
     fromHandle: msg.from?.username ? `@${msg.from.username}` : null,
     date: new Date(msg.date * 1000).toISOString(),
     attachments: extractAttachments(msg),
+    replyTo: extractReplyTo(msg),
   });
   log.line('person_auto_approved', { person: slug, telegramUserId });
 }

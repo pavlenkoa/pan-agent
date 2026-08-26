@@ -16,12 +16,20 @@ export interface ChatAttachment {
   mimeType: string | null;
 }
 
+/** What a `ChatMessage` was a Telegram-native reply to, if anything — quoted text is truncated (see REPLY_SNIPPET_MAX_LEN in router.ts), not the full original message. */
+export interface ChatReplyTo {
+  messageId: number;
+  snippet: string;
+  fromHandle: string | null;
+}
+
 export interface ChatMessage {
   messageId: number;
   text: string;
   fromHandle: string | null;
   date: string; // ISO 8601
   attachments?: ChatAttachment[];
+  replyTo?: ChatReplyTo;
 }
 
 export interface ChatTurn {

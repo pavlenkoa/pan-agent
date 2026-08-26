@@ -39,6 +39,42 @@ describe('buildPrompt — ChatTurn (regression guard)', () => {
     });
     expect(prompt).toBe('hello');
   });
+
+  it('surfaces a Telegram reply-to quote ahead of the message body', () => {
+    const prompt = buildPrompt({
+      kind: 'chat',
+      updateId: 1,
+      chatId: 42,
+      messages: [
+        {
+          messageId: 2,
+          text: 'so?',
+          fromHandle: '@andrii',
+          date: '2026-08-23T00:00:00Z',
+          replyTo: { messageId: 1, snippet: 'the download finished', fromHandle: '@panklaudbot' },
+        },
+      ],
+    });
+    expect(prompt).toBe('[replying to @panklaudbot: "the download finished"]\n@andrii: so?');
+  });
+
+  it('falls back to "(no text)" for a reply-to with an empty snippet (e.g. replying to a bare photo)', () => {
+    const prompt = buildPrompt({
+      kind: 'chat',
+      updateId: 1,
+      chatId: 42,
+      messages: [
+        {
+          messageId: 2,
+          text: 'nice',
+          fromHandle: null,
+          date: '2026-08-23T00:00:00Z',
+          replyTo: { messageId: 1, snippet: '', fromHandle: null },
+        },
+      ],
+    });
+    expect(prompt).toBe('[replying to a message: (no text)]\nnice');
+  });
 });
 
 describe('buildPrompt — TaskTurn', () => {

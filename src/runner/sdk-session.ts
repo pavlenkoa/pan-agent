@@ -13,7 +13,7 @@ import path from 'node:path';
 import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
+import type { ChatMessage, ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
@@ -135,7 +135,16 @@ ${noUpdateInstruction(
     // broke this in production before ControlTurn existed.
     return turn.command;
   }
-  return turn.messages.map((m) => (m.fromHandle ? `${m.fromHandle}: ${m.text}` : m.text)).join('\n');
+  return turn.messages.map(formatChatMessage).join('\n');
+}
+
+/** Surfaces Telegram's native reply-to-message quoting, if present — otherwise the model has no way to know a message was a reply at all, and can misread it as a fresh, unrelated statement. */
+function formatChatMessage(m: ChatMessage): string {
+  const body = m.fromHandle ? `${m.fromHandle}: ${m.text}` : m.text;
+  if (!m.replyTo) return body;
+  const quotedFrom = m.replyTo.fromHandle ?? 'a message';
+  const quoted = m.replyTo.snippet ? `"${m.replyTo.snippet}"` : '(no text)';
+  return `[replying to ${quotedFrom}: ${quoted}]\n${body}`;
 }
 
 export interface ResolvedReply {

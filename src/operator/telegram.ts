@@ -38,6 +38,14 @@ export interface TelegramSticker {
   set_name?: string;
 }
 
+/** Deliberately shallow (no nested reply_to_message/photo/etc.) — only what's needed to give the model quoting context, not a full recursive Message shape. */
+export interface TelegramReplyToMessage {
+  message_id: number;
+  from?: TelegramFrom;
+  text?: string;
+  caption?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramFrom;
@@ -48,6 +56,8 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   sticker?: TelegramSticker;
+  /** Present when the person used Telegram's native "reply" swipe/long-press on an earlier message (theirs, the bot's, or a third party's in principle — this bot is DM-only so in practice always one of the first two). */
+  reply_to_message?: TelegramReplyToMessage;
 }
 
 export interface TelegramUpdate {
