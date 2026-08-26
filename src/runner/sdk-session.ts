@@ -60,14 +60,30 @@ export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promi
  * delivered. Same "app-enforced, not SDK-trusted" pattern as the context
  * limit.
  */
-export const TASK_NO_UPDATE_MARKER = 'NO_UPDATE';
+export const NO_UPDATE_MARKER = 'NO_UPDATE';
+
+/**
+ * Shared wording for every place a turn is allowed to legitimately end in
+ * silence — factored out after `task_notification`'s own hand-rolled prompt
+ * (session-controller.ts's `reactToTaskNotification`) shipped *without* this
+ * instruction and leaked raw "no response needed" reasoning straight to
+ * Telegram in English, mid-Ukrainian-conversation (incident write-up:
+ * ~/task-notification-no-update-bug.md). One shared string means a future
+ * new silence-eligible turn kind can't repeat that mistake by simply
+ * forgetting to write its own copy.
+ */
+export function noUpdateInstruction(context: string): string {
+  return `${context} If there is genuinely nothing worth telling the person right now, reply with exactly the single line ${NO_UPDATE_MARKER} and nothing else; that suppresses delivery entirely while still being logged. Only write a real message when there's something they'd actually want to know.`;
+}
 
 export function buildPrompt(turn: TurnRequest): string {
   if (turn.kind === 'task') {
     return `[Scheduled task ${turn.taskId}, due ${turn.scheduledFor}]
 ${turn.prompt}
 
-This is an unattended background check-in, not a live question from the person — they won't see anything unless you tell them something. If there is genuinely nothing worth reporting (no change, no news), reply with exactly the single line ${TASK_NO_UPDATE_MARKER} and nothing else; that suppresses the Telegram message entirely while still being logged. Only write a real message when there's something they'd actually want to know.`;
+${noUpdateInstruction(
+      "This is an unattended background check-in, not a live question from the person — they won't see anything unless you tell them something.",
+    )}`;
   }
   if (turn.kind === 'control') {
     // Must be the bare command with nothing else in the message — confirmed
@@ -82,33 +98,38 @@ This is an unattended background check-in, not a live question from the person �
 export interface ResolvedReply {
   /** What to actually send to Telegram — empty means "send nothing". */
   replyText: string;
-  /** True when this was a task turn's `TASK_NO_UPDATE_MARKER` reply. */
-  isTaskNoUpdate: boolean;
   /**
-   * The task turn's reply with its trailing `TASK_NO_UPDATE_MARKER` line
-   * removed — populated only when `isTaskNoUpdate` is true, empty otherwise.
-   * This is the reasoning the model wrote before deciding to stay silent;
-   * `index.ts` logs it on `reply_muted` so a "why did the cron stay quiet"
-   * question is answerable from Loki instead of just "(no message sent)".
+   * True when the model chose to end the turn with the bare
+   * `NO_UPDATE_MARKER` instead of real text. Legitimate for a task turn
+   * (nothing new to report) or a chat turn (e.g. a `react_to_message`/
+   * `send_sticker` call already was the whole response) — never for a
+   * control turn, which never reaches the model in a way that could emit it.
+   */
+  isNoUpdate: boolean;
+  /**
+   * The reply with its trailing `NO_UPDATE_MARKER` line removed — populated
+   * only when `isNoUpdate` is true, empty otherwise. This is the reasoning
+   * the model wrote before deciding to stay silent; `index.ts` logs it on
+   * `reply_muted` so "why did this stay quiet" is answerable from Loki
+   * instead of just "(no message sent)".
    */
   suppressedReasoning: string;
 }
 
 /**
- * A task turn's `TASK_NO_UPDATE_MARKER` reply is only recognized on its own
- * trailing line — the model sometimes prepends genuine reasoning before it
- * (confirmed live: "Still only TELESYNC/HDTS cam-rips, no real upgrade.\n\n
- * NO_UPDATE"), and an exact `trim() === MARKER` match misses that case
- * entirely, delivering the literal marker text to Telegram despite the task
- * asking to stay silent. Trims each line individually (not just the whole
- * string) so a trailing blank line or trailing spaces on the marker's own
- * line don't defeat the match either.
+ * A `NO_UPDATE_MARKER` reply is only recognized on its own trailing line —
+ * the model sometimes prepends genuine reasoning before it (confirmed live:
+ * "Still only TELESYNC/HDTS cam-rips, no real upgrade.\n\nNO_UPDATE"), and an
+ * exact `trim() === MARKER` match misses that case entirely, delivering the
+ * literal marker text to Telegram despite asking to stay silent. Trims each
+ * line individually (not just the whole string) so a trailing blank line or
+ * trailing spaces on the marker's own line don't defeat the match either.
  */
 function stripTrailingNoUpdateMarker(text: string): { isMarker: boolean; reasoning: string } {
   const lines = text.split('\n');
   let lastIdx = lines.length - 1;
   while (lastIdx >= 0 && lines[lastIdx]!.trim() === '') lastIdx -= 1;
-  if (lastIdx < 0 || lines[lastIdx]!.trim() !== TASK_NO_UPDATE_MARKER) {
+  if (lastIdx < 0 || lines[lastIdx]!.trim() !== NO_UPDATE_MARKER) {
     return { isMarker: false, reasoning: '' };
   }
   return { isMarker: true, reasoning: lines.slice(0, lastIdx).join('\n').trim() };
@@ -122,13 +143,16 @@ function stripTrailingNoUpdateMarker(text: string): { isMarker: boolean; reasoni
  * server or a session controller. Takes a minimal structural shape rather
  * than importing `TurnResult` from session-controller.ts to avoid a
  * circular import (session-controller.ts already imports from this file).
+ * `task_notification`'s own reply (session-controller.ts) is also routed
+ * through this, via a synthesized `TaskTurn`, rather than than duplicating
+ * the marker-check logic there — see this file's `noUpdateInstruction` doc
+ * comment for why that duplication was the actual root cause last time.
  */
 export function resolveReplyText(turn: TurnRequest, result: { replyText: string; ok: boolean }): ResolvedReply {
-  const taskId = turn.kind === 'task' ? turn.taskId : null;
-  if (taskId !== null) {
+  if (turn.kind === 'task' || turn.kind === 'chat') {
     const { isMarker, reasoning } = stripTrailingNoUpdateMarker(result.replyText);
     if (isMarker) {
-      return { replyText: '', isTaskNoUpdate: true, suppressedReasoning: reasoning };
+      return { replyText: '', isNoUpdate: true, suppressedReasoning: reasoning };
     }
   }
   // A successful /compact or /clear produces an empty SDK result (confirmed
@@ -147,7 +171,7 @@ export function resolveReplyText(turn: TurnRequest, result: { replyText: string;
           : '✅ Cleared — starting fresh from here. Memory notes and scheduled tasks are unaffected.'
         : `⚠️ ${turn.command} timed out — try again in a moment.`
       : '');
-  return { replyText, isTaskNoUpdate: false, suppressedReasoning: '' };
+  return { replyText, isNoUpdate: false, suppressedReasoning: '' };
 }
 
 /**

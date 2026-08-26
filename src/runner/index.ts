@@ -146,7 +146,7 @@ async function main(): Promise<void> {
 
       try {
         const result = await controller.submitTurn(turn, key);
-        const { replyText, isTaskNoUpdate, suppressedReasoning } = resolveReplyText(turn, result);
+        const { replyText, isNoUpdate, suppressedReasoning } = resolveReplyText(turn, result);
 
         // Delivery is wrapped in its own try/catch (not the outer one) so a
         // failed sendTelegramReply still falls through to the turn_end log
@@ -162,11 +162,13 @@ async function main(): Promise<void> {
             log.line('reply_sent', { person: cfg.slug, turn: key, text, bytes });
             await sendTelegramReply(cfg.telegramBotToken, turn.chatId, replyText);
           } else {
-            const { text, bytes } = truncateText(isTaskNoUpdate ? suppressedReasoning : '');
+            const { text, bytes } = truncateText(isNoUpdate ? suppressedReasoning : '');
             log.line('reply_muted', {
               person: cfg.slug,
               turn: key,
-              reason: isTaskNoUpdate ? 'task_no_update' : 'empty',
+              // turn.kind is guaranteed 'task' or 'chat' whenever isNoUpdate
+              // is true — resolveReplyText never sets it for a control turn.
+              reason: isNoUpdate ? (turn.kind === 'task' ? 'task_no_update' : 'chat_no_update') : 'empty',
               text,
               bytes,
             });

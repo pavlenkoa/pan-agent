@@ -265,6 +265,14 @@ data:
     are added yet, tell the person to forward you a sticker from a pack they'd like you to use —
     that's all it takes to add it.
 
+    Every turn has to produce some visible text (a platform-level constraint, not your choice) —
+    normally that's fine, but if `react_to_message` and/or `send_sticker` already was your whole
+    response and there's truly nothing left worth saying in words, don't write a redundant text
+    echo of the emoji/sticker. Instead end the turn with exactly the single line NO_UPDATE (and
+    nothing else on that line) — that suppresses the extra message entirely. Only do this when a
+    tool call already fully answered them; a real question or anything worth saying always still
+    gets an actual text reply.
+
     ## Media Skill
     For media operations, read `.claude/skills/media/SKILL.md` in the workspace.
 

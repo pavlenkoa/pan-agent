@@ -15,14 +15,22 @@
 import { query as sdkQuery, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import { DEFAULT_CONTEXT_LIMIT, type ContextUsageSummary, type EffortLevel, type TurnRequest } from '../shared/types.js';
+import {
+  DEFAULT_CONTEXT_LIMIT,
+  type ContextUsageSummary,
+  type EffortLevel,
+  type TaskTurn,
+  type TurnRequest,
+} from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
   buildPrompt,
   buildQueryOptions,
   buildUserMessage,
   logSdkMessage,
+  noUpdateInstruction,
   readSavedSessionId,
+  resolveReplyText,
   saveSessionId,
   summarizeContextUsage,
   summarizeUsage,
@@ -258,18 +266,40 @@ export function createSessionController(
     if (reaction) void reactToTaskNotification(reaction);
   }
 
+  /**
+   * Confirmed live 2026-08-26 (~/task-notification-no-update-bug.md): this
+   * prompt used to have no NO_UPDATE escape hatch at all, unlike
+   * `buildPrompt`'s task-kind branch — a second notification for the same
+   * background event with nothing new to add got the model writing its "no
+   * update needed" reasoning as literal English prose, which shipped
+   * straight to Telegram mid-Ukrainian-conversation. Now shares the same
+   * `noUpdateInstruction` wording and is routed through `resolveReplyText`
+   * (via a synthesized `TaskTurn` — task_notification isn't a real
+   * `TurnRequest` of its own) instead of delivering `result.replyText`
+   * unconditionally.
+   */
   async function reactToTaskNotification(reaction: PendingReaction): Promise<void> {
     const turnId = `bgtask:${reaction.taskId}:${Date.now()}`;
-    const text = `[Background task ${reaction.taskId} ${reaction.status}]\n${reaction.summary}`;
-    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
+    const promptText = `[Background task ${reaction.taskId} ${reaction.status}]
+${reaction.summary}
+
+${noUpdateInstruction(
+      "This is an unattended background follow-up, not a live question from the person — they won't see anything unless you tell them something new (don't repeat something you've already told them in an earlier message).",
+    )}`;
+    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: promptText }, parent_tool_use_id: null };
     reactable.messageId = null; // synthetic push, not a real inbound message
 
     try {
       const result = await startJob('task_notification', turnId, message);
-      if (result.replyText.trim()) {
-        const { text, bytes } = truncateText(result.replyText);
+      const fakeTaskTurn: TaskTurn = { kind: 'task', taskId: reaction.taskId, scheduledFor: '', chatId: cfg.chatId, prompt: '' };
+      const resolved = resolveReplyText(fakeTaskTurn, result);
+      if (resolved.replyText.trim()) {
+        const { text, bytes } = truncateText(resolved.replyText);
         log.line('reply_sent', { person: cfg.slug, turn: turnId, text, bytes });
-        await sendTelegramReply(cfg.telegramBotToken, cfg.chatId, result.replyText);
+        await sendTelegramReply(cfg.telegramBotToken, cfg.chatId, resolved.replyText);
+      } else if (resolved.isNoUpdate) {
+        const { text, bytes } = truncateText(resolved.suppressedReasoning);
+        log.line('reply_muted', { person: cfg.slug, turn: turnId, reason: 'task_notification_no_update', text, bytes });
       }
     } catch (err) {
       log.error('task_notification_reaction_failed', err, { person: cfg.slug, taskId: reaction.taskId });

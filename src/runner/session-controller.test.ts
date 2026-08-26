@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatTurn, ControlTurn } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import { createPushableQueue } from './pushable-queue.js';
+import { NO_UPDATE_MARKER } from './sdk-session.js';
 import type { SessionController } from './session-controller.js';
 
 vi.mock('./telegram-send.js', () => ({ sendTelegramReply: vi.fn().mockResolvedValue(undefined) }));
@@ -186,6 +187,27 @@ describe('createSessionController', () => {
     await vi.waitFor(() =>
       expect(sendTelegramReply).toHaveBeenCalledWith(cfg.telegramBotToken, cfg.chatId, 'done downloading Iron Man'),
     );
+  });
+
+  it('a task_notification with nothing new to report stays silent instead of leaking reasoning to Telegram', async () => {
+    // Regression guard for ~/task-notification-no-update-bug.md: this path
+    // used to deliver result.replyText unconditionally, with no NO_UPDATE
+    // escape hatch — a second notification for the same event with nothing
+    // new to add got the model's "nothing to report" reasoning shipped
+    // straight to Telegram as literal prose.
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+
+    fakeEvents.push(taskNotification('bg-1', 'torrent finished'));
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+
+    fakeEvents.push(resultMessage(`Already reported this.\n${NO_UPDATE_MARKER}`));
+
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(false));
+    await flushMicrotasks();
+    expect(sendTelegramReply).not.toHaveBeenCalled();
   });
 
   it('a task_notification while busy queues and runs only after the current job resolves', async () => {

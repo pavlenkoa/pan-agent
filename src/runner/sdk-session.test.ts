@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { turnKey } from '../shared/types.js';
-import { buildPrompt, resolveReplyText, TASK_NO_UPDATE_MARKER } from './sdk-session.js';
+import { buildPrompt, NO_UPDATE_MARKER, resolveReplyText } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
   it('returns the bare command with no prefix, regardless of chatId', () => {
@@ -47,25 +47,25 @@ describe('buildPrompt — TaskTurn', () => {
     });
     expect(prompt).toContain('[Scheduled task task-1, due 2026-08-24T09:00:00Z]');
     expect(prompt).toContain('Check if Silo has new episodes.');
-    expect(prompt).toContain(TASK_NO_UPDATE_MARKER);
+    expect(prompt).toContain(NO_UPDATE_MARKER);
   });
 });
 
 describe('resolveReplyText — TaskTurn no-update suppression', () => {
   const task = { kind: 'task' as const, taskId: 'task-1', scheduledFor: '2026-08-24T09:00:00Z', chatId: 42, prompt: 'check' };
 
-  it('suppresses delivery on a bare TASK_NO_UPDATE_MARKER reply', () => {
-    expect(resolveReplyText(task, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
+  it('suppresses delivery on a bare NO_UPDATE_MARKER reply', () => {
+    expect(resolveReplyText(task, { replyText: NO_UPDATE_MARKER, ok: true })).toEqual({
       replyText: '',
-      isTaskNoUpdate: true,
+      isNoUpdate: true,
       suppressedReasoning: '',
     });
   });
 
   it('still suppresses when the marker has surrounding whitespace', () => {
-    expect(resolveReplyText(task, { replyText: `  ${TASK_NO_UPDATE_MARKER}  `, ok: true })).toEqual({
+    expect(resolveReplyText(task, { replyText: `  ${NO_UPDATE_MARKER}  `, ok: true })).toEqual({
       replyText: '',
-      isTaskNoUpdate: true,
+      isNoUpdate: true,
       suppressedReasoning: '',
     });
   });
@@ -75,27 +75,27 @@ describe('resolveReplyText — TaskTurn no-update suppression', () => {
     // marker line — an exact `trim() === MARKER` match misses this entirely
     // and delivers the literal marker text to Telegram.
     const reasoning = 'Still only TELESYNC/HDTS cam-rips, no real upgrade.';
-    expect(resolveReplyText(task, { replyText: `${reasoning}\n\n${TASK_NO_UPDATE_MARKER}`, ok: true })).toEqual({
+    expect(resolveReplyText(task, { replyText: `${reasoning}\n\n${NO_UPDATE_MARKER}`, ok: true })).toEqual({
       replyText: '',
-      isTaskNoUpdate: true,
+      isNoUpdate: true,
       suppressedReasoning: reasoning,
     });
   });
 
   it('suppresses when the marker line has trailing spaces and a trailing newline', () => {
     const reasoning = 'checking tomorrow instead';
-    expect(resolveReplyText(task, { replyText: `${reasoning}\n${TASK_NO_UPDATE_MARKER} \n`, ok: true })).toEqual({
+    expect(resolveReplyText(task, { replyText: `${reasoning}\n${NO_UPDATE_MARKER} \n`, ok: true })).toEqual({
       replyText: '',
-      isTaskNoUpdate: true,
+      isNoUpdate: true,
       suppressedReasoning: reasoning,
     });
   });
 
   it('does NOT suppress when the marker is not on its own trailing line', () => {
-    const replyText = `${TASK_NO_UPDATE_MARKER} available yet, still checking tomorrow`;
+    const replyText = `${NO_UPDATE_MARKER} available yet, still checking tomorrow`;
     expect(resolveReplyText(task, { replyText, ok: true })).toEqual({
       replyText,
-      isTaskNoUpdate: false,
+      isNoUpdate: false,
       suppressedReasoning: '',
     });
   });
@@ -103,16 +103,41 @@ describe('resolveReplyText — TaskTurn no-update suppression', () => {
   it('passes through a real task reply untouched', () => {
     expect(resolveReplyText(task, { replyText: 'нова серія вийшла!', ok: true })).toEqual({
       replyText: 'нова серія вийшла!',
-      isTaskNoUpdate: false,
+      isNoUpdate: false,
+      suppressedReasoning: '',
+    });
+  });
+});
+
+describe('resolveReplyText — ChatTurn no-update suppression', () => {
+  // Deliberate behavior change from the original task-only suppression: a
+  // chat turn now honors NO_UPDATE too, so a turn where react_to_message/
+  // send_sticker already was the whole response doesn't also have to emit a
+  // redundant text echo just to satisfy the CLI's "must produce visible
+  // output" constraint (see noUpdateInstruction's doc comment).
+  const chat = { kind: 'chat' as const, updateId: 1, chatId: 42, messages: [] };
+
+  it('suppresses delivery on a bare NO_UPDATE_MARKER reply', () => {
+    expect(resolveReplyText(chat, { replyText: NO_UPDATE_MARKER, ok: true })).toEqual({
+      replyText: '',
+      isNoUpdate: true,
       suppressedReasoning: '',
     });
   });
 
-  it('does not suppress a ChatTurn even if its reply happens to equal the marker text', () => {
-    const chat = { kind: 'chat' as const, updateId: 1, chatId: 42, messages: [] };
-    expect(resolveReplyText(chat, { replyText: TASK_NO_UPDATE_MARKER, ok: true })).toEqual({
-      replyText: TASK_NO_UPDATE_MARKER,
-      isTaskNoUpdate: false,
+  it('suppresses when the marker sits on its own trailing line after reasoning', () => {
+    const reasoning = 'Already reacted with 👍, nothing more to add.';
+    expect(resolveReplyText(chat, { replyText: `${reasoning}\n${NO_UPDATE_MARKER}`, ok: true })).toEqual({
+      replyText: '',
+      isNoUpdate: true,
+      suppressedReasoning: reasoning,
+    });
+  });
+
+  it('passes through a real chat reply untouched', () => {
+    expect(resolveReplyText(chat, { replyText: 'звісно, зараз гляну', ok: true })).toEqual({
+      replyText: 'звісно, зараз гляну',
+      isNoUpdate: false,
       suppressedReasoning: '',
     });
   });
