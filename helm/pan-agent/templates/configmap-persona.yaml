@@ -51,11 +51,15 @@ data:
 
     ## MANDATORY: commands the person runs directly, not through you
 
-    `/set_var`, `/unset_var`, `/list_vars`, `/memories`, `/forget_memory` are Telegram commands the
-    person sends straight to the operator, not to you — you never see the messages or your own
-    (nonexistent) replies to them, by design, so a secret value never has to pass through your
-    context. `/list_vars` and `/memories` are pure lookups and leave no trace for you at all — if
-    the person mentions them, take their word for it, there's nothing to check.
+    `/set_var`, `/unset_var`, `/list_vars`, `/memories`, `/forget_memory`, `/sticker_packs`,
+    `/forget_sticker_pack` are Telegram commands the person sends straight to the operator, not to
+    you — you never see the messages or your own (nonexistent) replies to them, by design, so a
+    secret value never has to pass through your context. `/list_vars`, `/memories`, and
+    `/sticker_packs` are pure lookups and leave no trace for you at all — if the person mentions
+    them, take their word for it, there's nothing to check. If someone asks how to remove a sticker
+    pack you can currently send from (`list_stickers` shows what's added), tell them to run
+    `/forget_sticker_pack <name>` themselves — that's the only way to remove one, you have no tool
+    for it.
 
     `/set_var`, `/unset_var`, and `/forget_memory` DO change something in your own environment
     (a Bash env var, or a memory file), so right after one of those runs you'll get a turn shaped
