@@ -6,6 +6,7 @@
  * turning a `TurnRequest` into the message pushed onto that stream, and the
  * one-time query options built once at session start.
  */
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -41,6 +42,39 @@ export async function readSavedSessionId(cfg: RunnerConfig): Promise<string | nu
 
 export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promise<void> {
   await writeFile(cfg.sessionIdFile, sessionId, 'utf8');
+}
+
+/**
+ * Confirmed against the installed SDK's own type declarations (`sdk.d.ts`):
+ * a resumed session's CLAUDE.md reload is not automatic — the only reload
+ * primitive found (`SDKControlRegisterRepoRootRequest.reload_claude_md`) is
+ * scoped to a directory registered under `cwd`, which the persona file
+ * (`claudeHome`, i.e. `~/.claude/CLAUDE.md`) isn't. Confirmed live
+ * 2026-08-26: a resumed person session kept describing old (pre-update)
+ * behavior as current well after a persona update had already landed on
+ * disk and the pod had restarted — a plain routine restart doesn't re-inject
+ * CLAUDE.md into an already-established `resume: sessionId` conversation the
+ * way it would for a genuinely new one. `Read` on the file itself is always
+ * a fresh disk read regardless, so the fix is having the model do that
+ * itself (session-controller.ts's `nudgePersonaRefresh`) — this function
+ * just decides *when* that's worth doing: compares the freshly-installed
+ * content's hash against the hash last acknowledged, persisted on the same
+ * NFS mount so it survives restarts. Returns false on a person's very first
+ * ever boot (no prior hash to compare) since a brand new session reads
+ * CLAUDE.md naturally and needs no nudge.
+ */
+export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentContent: string): Promise<boolean> {
+  const ackPath = path.join(cfg.claudeHome, 'pan-agent-persona-hash');
+  const hash = createHash('sha256').update(currentContent).digest('hex');
+  let prevHash: string | null;
+  try {
+    prevHash = (await readFile(ackPath, 'utf8')).trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    prevHash = null;
+  }
+  await writeFile(ackPath, hash, 'utf8');
+  return prevHash !== null && prevHash !== hash;
 }
 
 /**

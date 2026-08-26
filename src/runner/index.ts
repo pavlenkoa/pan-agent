@@ -25,7 +25,7 @@ import type { ControlRequest, ControlResponse, TurnRequest } from '../shared/typ
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { createSessionController } from './session-controller.js';
-import { resolveReplyText } from './sdk-session.js';
+import { personaChangedSinceLastAck, readSavedSessionId, resolveReplyText } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
@@ -97,10 +97,20 @@ async function main(): Promise<void> {
   const cfg = loadRunnerConfig();
   const journal = createJournal(cfg.journalDir);
   await ensureGitIdentity();
+  // Checked before installPersonaFiles overwrites CLAUDE.md, and before the
+  // session starts (so it reflects whether this boot is resuming a real
+  // prior conversation) — see personaChangedSinceLastAck's doc comment for
+  // why a resumed session needs an explicit nudge to see this at all.
+  const wasResuming = (await readSavedSessionId(cfg)) !== null;
   await installPersonaFiles(cfg);
+  const installedPersona = await readFile(path.join(cfg.claudeHome, 'CLAUDE.md'), 'utf8').catch(() => '');
+  const personaChanged = installedPersona ? await personaChangedSinceLastAck(cfg, installedPersona) : false;
 
   const controller = createSessionController(cfg);
   await controller.start();
+  if (wasResuming && personaChanged) {
+    void controller.nudgePersonaRefresh();
+  }
 
   let busy = false;
 

@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { turnKey } from '../shared/types.js';
-import { buildPrompt, NO_UPDATE_MARKER, resolveReplyText } from './sdk-session.js';
+import type { RunnerConfig } from './config.js';
+import { buildPrompt, NO_UPDATE_MARKER, personaChangedSinceLastAck, resolveReplyText } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
   it('returns the bare command with no prefix, regardless of chatId', () => {
@@ -171,6 +176,53 @@ describe('resolveReplyText — ChatTurn', () => {
   it('passes an empty reply straight through as empty (no synthesis for chat)', () => {
     const turn = { kind: 'chat' as const, updateId: 1, chatId: 42, messages: [] };
     expect(resolveReplyText(turn, { replyText: '', ok: true }).replyText).toBe('');
+  });
+});
+
+describe('personaChangedSinceLastAck', () => {
+  let dir: string;
+  let cfg: RunnerConfig;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-persona-'));
+    cfg = {
+      slug: 'test',
+      chatId: 1,
+      tz: 'UTC',
+      port: 8080,
+      operatorTasksUrl: 'http://operator.invalid',
+      tasksToken: 'test-token',
+      telegramBotToken: 'bot-token',
+      journalDir: dir,
+      workspaceCwd: dir,
+      claudeHome: dir,
+      sessionIdFile: path.join(dir, 'session-id'),
+      customVarsDoc: [],
+    };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns false on the very first check — no prior hash to compare, a fresh session needs no nudge', async () => {
+    expect(await personaChangedSinceLastAck(cfg, 'content v1')).toBe(false);
+  });
+
+  it('returns false when content is unchanged since the last check', async () => {
+    await personaChangedSinceLastAck(cfg, 'content v1');
+    expect(await personaChangedSinceLastAck(cfg, 'content v1')).toBe(false);
+  });
+
+  it('returns true when content changed since the last check', async () => {
+    await personaChangedSinceLastAck(cfg, 'content v1');
+    expect(await personaChangedSinceLastAck(cfg, 'content v2')).toBe(true);
+  });
+
+  it('only reports a given change once — acknowledges it immediately, not just on a later call', async () => {
+    await personaChangedSinceLastAck(cfg, 'content v1');
+    await personaChangedSinceLastAck(cfg, 'content v2');
+    expect(await personaChangedSinceLastAck(cfg, 'content v2')).toBe(false);
   });
 });
 

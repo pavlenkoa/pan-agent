@@ -249,14 +249,46 @@ stdout to your log backend picks it up like any other pod.
   staying silent while, contradictorily, sending exactly that as the
   message. Since the model can never truly produce zero output, `buildPrompt`
   (`sdk-session.ts`) instead gives task-kind turns a real, satisfiable
-  escape hatch — reply with exactly `TASK_NO_UPDATE_MARKER` ("NO_UPDATE")
-  and nothing else when there's nothing worth reporting — and `index.ts`'s
+  escape hatch — reply with exactly `NO_UPDATE_MARKER` ("NO_UPDATE") and
+  nothing else when there's nothing worth reporting — and `index.ts`'s
   `handleTurn` recognizes that exact reply and swallows it before
   `sendTelegramReply`, never delivering it. Still logged via the normal
-  per-message SDK log either way (`task_no_update` line), so nothing about
-  a "silent" check is actually invisible — only the Telegram delivery is
-  suppressed. Same "app-enforced, not SDK-trusted" shape as the context
-  limit above.
+  per-message SDK log either way (`task_no_update`/`chat_no_update` line), so
+  nothing about a "silent" turn is actually invisible — only the Telegram
+  delivery is suppressed. Same "app-enforced, not SDK-trusted" shape as the
+  context limit above. Generalized 2026-08-26 to chat turns too (a
+  `react_to_message`/`send_sticker` call can be a turn's whole response, and
+  without this the model duplicated itself — sticker *and* a text echo of
+  the same emoji — just to satisfy the CLI's constraint), and `resolveReplyText`
+  is now also what `session-controller.ts`'s `reactToTaskNotification`
+  routes through (via a synthesized `TaskTurn`) instead of delivering its
+  reply unconditionally — that path originally had no `NO_UPDATE` support at
+  all, and leaked raw "no update needed" reasoning straight to Telegram in
+  English mid-Ukrainian-conversation before the fix (incident:
+  `~/task-notification-no-update-bug.md`).
+- **A resumed session does NOT pick up a persona/CLAUDE.md edit on its
+  own.** Confirmed against the installed SDK's own `sdk.d.ts`: the only
+  CLAUDE.md-reload primitive found (`SDKControlRegisterRepoRootRequest`'s
+  `reload_claude_md`) is scoped to a directory registered under `cwd`, which
+  the persona file (`claudeHome`, i.e. `~/.claude/CLAUDE.md`) isn't — there's
+  no general "reload my system-level CLAUDE.md" call. Confirmed live
+  2026-08-26: a person's session, resumed across a routine pod restart
+  (`resume: sessionId`), kept describing pre-update behavior as current well
+  after a persona edit had landed on disk — the model's context was
+  established once, at the session's true first-ever turn, and a plain
+  restart for a new image doesn't re-inject a fresh read the way a genuinely
+  new session naturally gets one. Fixed via `sdk-session.ts`'s
+  `personaChangedSinceLastAck` (hashes the freshly-installed CLAUDE.md
+  against a hash persisted on the same NFS mount, so it only fires on a real
+  change, once) plus `session-controller.ts`'s `nudgePersonaRefresh` (a
+  one-shot, internal-only push telling the model to `Read` its own
+  `~/.claude/CLAUDE.md` — `Read` is always a fresh disk read regardless of
+  whatever the SDK's own resume/system-prompt behavior is, so this doesn't
+  depend on an unconfirmed SDK guarantee). `index.ts`'s `main()` calls this
+  once at boot, only when both the hash changed *and* this boot is resuming
+  a real prior session (checked via `readSavedSessionId` before
+  `installPersonaFiles` overwrites the file) — a brand new session needs no
+  nudge, it reads CLAUDE.md naturally at its first turn.
 - **Shared skills: one `SKILL-<name>.md` ConfigMap key per skill, not
   hardcoded to `media`.** `runner/index.ts`'s `installPersonaFiles` installs
   every `SKILL-<name>.md` key in the persona ConfigMap as

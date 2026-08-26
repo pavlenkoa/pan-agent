@@ -210,6 +210,21 @@ describe('createSessionController', () => {
     expect(sendTelegramReply).not.toHaveBeenCalled();
   });
 
+  it('nudgePersonaRefresh never delivers its reply to Telegram, no matter what the model says', async () => {
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+
+    const nudgePromise = controller.nudgePersonaRefresh();
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('Got it — re-read CLAUDE.md, noted the new sticker/reaction tools.'));
+    await nudgePromise;
+
+    expect(sendTelegramReply).not.toHaveBeenCalled();
+    expect(controller.isBusy()).toBe(false);
+  });
+
   it('a task_notification while busy queues and runs only after the current job resolves', async () => {
     const fakeEvents = createPushableQueue<SDKMessage>();
     controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));

@@ -75,6 +75,17 @@ export interface SessionController {
   setEffortLevel(level: EffortLevel): Promise<void>;
   /** App-enforced soft cap, not an SDK setting — see `maybeTriggerAutoCompact` below for why. Pure local state, no queryHandle needed, safe to call before the session starts. */
   setContextLimit(tokens: number): void;
+  /**
+   * One-shot, internal-only push telling the model to re-read its own
+   * CLAUDE.md via the Read tool — see `personaChangedSinceLastAck`'s doc
+   * comment (sdk-session.ts) for why this is needed at all: a resumed
+   * session doesn't pick up a persona update on its own. `index.ts`'s
+   * `main()` calls this once at boot, only when that function says the
+   * content actually changed since last acknowledged AND this is a resumed
+   * session (a fresh one reads CLAUDE.md naturally, no nudge needed). Never
+   * delivers whatever the model replies to Telegram — purely internal.
+   */
+  nudgePersonaRefresh(): Promise<void>;
 }
 
 type QueryFn = typeof sdkQuery;
@@ -87,7 +98,7 @@ interface PendingReaction {
 
 interface Job {
   turnId: string;
-  trigger: 'http' | 'task_notification' | 'auto_compact';
+  trigger: 'http' | 'task_notification' | 'auto_compact' | 'persona_refresh';
   startedAt: number;
   resolve: (result: TurnResult) => void;
   reject: (err: unknown) => void;
@@ -306,6 +317,22 @@ ${noUpdateInstruction(
     }
   }
 
+  /** See `SessionController.nudgePersonaRefresh`'s doc comment for why this exists at all. */
+  async function nudgePersonaRefresh(): Promise<void> {
+    const turnId = `persona-refresh:${Date.now()}`;
+    const text =
+      '[System note: your persona instructions (~/.claude/CLAUDE.md) were updated since this conversation started — a routine restart does not re-load them into your context on its own. Use the Read tool on ~/.claude/CLAUDE.md now so you have the current instructions. This is internal only, not a message from the person — do not reply to them about it.]';
+    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
+    reactable.messageId = null; // synthetic push, not a real inbound message
+    try {
+      const result = await startJob('persona_refresh', turnId, message);
+      const { text: preview, bytes } = truncateText(result.replyText);
+      log.line('persona_refresh_acked', { person: cfg.slug, turn: turnId, text: preview, bytes });
+    } catch (err) {
+      log.error('persona_refresh_failed', err, { person: cfg.slug });
+    }
+  }
+
   /**
    * App-enforced ceiling, checked after every job — the SDK's own
    * `autoCompactThreshold` scales up near the model's full window (see
@@ -462,5 +489,6 @@ ${noUpdateInstruction(
     setContextLimit(tokens: number): void {
       contextLimit = tokens;
     },
+    nudgePersonaRefresh,
   };
 }
