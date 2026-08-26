@@ -32,6 +32,8 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'forget_memory', description: 'Delete one memory file by name (see /memories)' },
   { command: 'skills', description: 'List custom skills the assistant has built for you' },
   { command: 'forget_skill', description: 'Delete one custom skill by name (see /skills)' },
+  { command: 'sticker_packs', description: 'List sticker packs the assistant can send from (send a sticker to add one)' },
+  { command: 'forget_sticker_pack', description: 'Remove one sticker pack by name (see /sticker_packs)' },
   { command: 'context', description: 'Show current context/token usage for your session' },
   { command: 'effort', description: 'Show or set model effort for this session: low|medium|high|xhigh' },
   { command: 'context_limit', description: 'Show or set your auto-compact token limit (default 250,000)' },

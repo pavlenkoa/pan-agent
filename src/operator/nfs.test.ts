@@ -12,6 +12,9 @@ let listMemoryFiles: typeof import('./nfs.js').listMemoryFiles;
 let deleteMemoryFile: typeof import('./nfs.js').deleteMemoryFile;
 let listPersonSkills: typeof import('./nfs.js').listPersonSkills;
 let deletePersonSkill: typeof import('./nfs.js').deletePersonSkill;
+let listStickerPacks: typeof import('./nfs.js').listStickerPacks;
+let addStickerPack: typeof import('./nfs.js').addStickerPack;
+let removeStickerPack: typeof import('./nfs.js').removeStickerPack;
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-nfs-'));
@@ -21,6 +24,9 @@ beforeAll(async () => {
   deleteMemoryFile = mod.deleteMemoryFile;
   listPersonSkills = mod.listPersonSkills;
   deletePersonSkill = mod.deletePersonSkill;
+  listStickerPacks = mod.listStickerPacks;
+  addStickerPack = mod.addStickerPack;
+  removeStickerPack = mod.removeStickerPack;
 });
 
 afterAll(async () => {
@@ -176,5 +182,41 @@ describe('deletePersonSkill', () => {
     const skillsDir = path.join(dir, 'people', 'marta3', 'workspace', '.claude', 'skills');
     await mkdir(skillsDir, { recursive: true });
     expect(await deletePersonSkill('marta3', 'does-not-exist')).toBe(false);
+  });
+});
+
+describe('listStickerPacks / addStickerPack / removeStickerPack', () => {
+  it('returns an empty list when no pack file exists yet', async () => {
+    expect(await listStickerPacks('nobody')).toEqual([]);
+  });
+
+  it('adds a pack and reports it back, creating the person dir if needed', async () => {
+    expect(await addStickerPack('taras', 'PeachCat')).toEqual({ added: true });
+
+    const packs = await listStickerPacks('taras');
+    expect(packs).toEqual([{ name: 'PeachCat', addedAt: expect.any(String) }]);
+  });
+
+  it('dedups adding the same pack twice', async () => {
+    await addStickerPack('nadia', 'DogePack');
+    expect(await addStickerPack('nadia', 'DogePack')).toEqual({ added: false });
+
+    const packs = await listStickerPacks('nadia');
+    expect(packs).toHaveLength(1);
+  });
+
+  it('is scoped per person', async () => {
+    await addStickerPack('only-hanna', 'HannaPack');
+    expect(await listStickerPacks('someone-else')).toEqual([]);
+  });
+
+  it('removes a pack that exists and reports it removed', async () => {
+    await addStickerPack('roman', 'ToRemove');
+    expect(await removeStickerPack('roman', 'ToRemove')).toBe(true);
+    expect(await listStickerPacks('roman')).toEqual([]);
+  });
+
+  it('returns false removing a pack that was never added', async () => {
+    expect(await removeStickerPack('roman', 'NeverAdded')).toBe(false);
   });
 });

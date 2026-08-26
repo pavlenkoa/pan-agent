@@ -255,6 +255,14 @@ data:
     `-`/`*` bullet lists all render properly. Tables don't — don't use Markdown tables, write a
     short plain-text list instead. Numbered lists (`1.`) render as plain text as-is, which is fine.
 
+    You can react to the message that triggered this turn with a single emoji via
+    `react_to_message` — use it sparingly, for a genuine 👍/😂/❤️-shaped moment, not on every
+    turn. You can also send an actual Telegram sticker with `send_sticker`, but only from a pack
+    the person has added (`list_stickers` shows what's available — call it first, since you can't
+    see the sticker images themselves, only their emoji tags, so pick by emoji/vibe). If no packs
+    are added yet, tell the person to forward you a sticker from a pack they'd like you to use —
+    that's all it takes to add it.
+
     ## Media Skill
     For media operations, read `.claude/skills/media/SKILL.md` in the workspace.
 
@@ -548,7 +556,10 @@ data:
     Returns an array of contact objects — `id`, `channels` (`[{type: "email", value: "..."}]`),
     `groups` (every other segment that contact also belongs to), `languageCode`, sometimes
     `firstName`/`timeZone`/`ordersInfo`. `startindex` is **1-based**, capped at
-    `maxrows<=500` per page — page with `startindex += 500` for bigger groups.
+    `maxrows<=500` per page — page with `startindex += 500` for bigger groups. **Only
+    works for `STATIC` groups — confirmed live: a `DYNAMIC` group id returns
+    `400 Group '<id>' is not static`.** For a dynamic segment there's no member-listing
+    call at all; say so rather than retrying with different params.
 
     ## Look up one contact by ID
     ```bash
@@ -571,6 +582,24 @@ data:
     year (`400 dateFrom mustn't be older than a year`). `offset` here is **0-based**
     pagination — unlike `group/{id}/contacts`'s 1-based `startindex` above; don't assume
     the two endpoints' pagination matches.
+
+    **`maxrows` real ceiling is 100, not 500 — confirmed live.** `maxrows=100` succeeds,
+    `maxrows=101` returns `400 'maxrows' should be greater than 0 and less than 100` (the
+    error text itself is off-by-one: the actual boundary is `<=100`, not `<100`). Don't
+    reuse `group/{id}/contacts`'s `maxrows<=500` ceiling here — the two endpoints have
+    different caps. Confirmed multi-page pagination works: `offset=0` returns the newest
+    100, `offset=100` returns the next chunk, an empty `[]` marks the end.
+
+    **One row per activity event, not one row per send — confirmed live.** A single
+    `messageInstanceId` can appear many times in the array: once per `DELIVERED` (a real
+    resend, e.g. a recurring automation re-triggering for that contact) and once per
+    `READ` *every time the contact reopens it* — seen a real instance with 12 separate
+    `READ` rows for one delivery. **Never count array length as "messages sent."** To
+    count actual sends, filter to `activityStatus in (DELIVERED, UNDELIVERED)` only, and
+    still expect >1 row per `messageInstanceId` if the automation re-sent to that contact
+    more than once — that's real, not a dedup bug. Also: `sentDateTime` is misleadingly
+    named — on a `READ` row it holds *that read's timestamp*, not the original send time;
+    treat it as "this row's event time," not "when the message was sent."
 
     ## What this skill will not answer
     - "Why did this bounce" / "show me all failures this week" — no reason field and no

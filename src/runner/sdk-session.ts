@@ -17,6 +17,7 @@ import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
 import { buildSchedulingMcpServer } from './scheduling-tools.js';
+import { buildTelegramExtrasMcpServer, type ReactableMessageRef } from './telegram-extras-tools.js';
 
 interface LooseContentBlock {
   type: string;
@@ -182,6 +183,12 @@ const SCHEDULING_TOOLS = [
 
 const ATTACHMENT_TOOLS = ['mcp__pan-agent-attachments__send_file'];
 
+const TELEGRAM_EXTRAS_TOOLS = [
+  'mcp__pan-agent-telegram-extras__list_stickers',
+  'mcp__pan-agent-telegram-extras__send_sticker',
+  'mcp__pan-agent-telegram-extras__react_to_message',
+];
+
 /**
  * `allowedTools` only auto-approves listed tools without a permission
  * prompt — it does NOT restrict which built-in tools exist. Without `tools`
@@ -268,7 +275,7 @@ function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
   };
 }
 
-export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): Options {
+export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null, reactable: ReactableMessageRef): Options {
   return {
     cwd: cfg.workspaceCwd,
     ...(sessionId ? { resume: sessionId } : {}),
@@ -317,6 +324,7 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
     mcpServers: {
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),
+      'pan-agent-telegram-extras': buildTelegramExtrasMcpServer(cfg, reactable),
     },
     allowedTools: [
       'Bash',
@@ -330,6 +338,7 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null): 
       'Skill',
       ...SCHEDULING_TOOLS,
       ...ATTACHMENT_TOOLS,
+      ...TELEGRAM_EXTRAS_TOOLS,
     ],
   };
 }

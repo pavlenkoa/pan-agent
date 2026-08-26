@@ -142,6 +142,51 @@ export async function sendTelegramPhoto(
   await uploadFile(token, 'sendPhoto', 'photo', chatId, fileName, bytes, caption);
 }
 
+export async function sendTelegramSticker(token: string, chatId: number, fileId: string): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendSticker`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, sticker: fileId }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const result = (await res.json()) as SendResult;
+  if (!result.ok) throw new Error(`sendSticker failed: ${result.description ?? 'unknown'}`);
+}
+
+/**
+ * `reaction: []` clears an existing reaction — not currently exposed to the
+ * model (only ever called with one emoji), but that's what an empty array
+ * means to this endpoint if a future caller wants it.
+ */
+export async function setTelegramMessageReaction(token: string, chatId: number, messageId: number, emoji: string): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/setMessageReaction`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, reaction: [{ type: 'emoji', emoji }] }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const result = (await res.json()) as SendResult;
+  if (!result.ok) throw new Error(`setMessageReaction failed: ${result.description ?? 'unknown'}`);
+}
+
+export interface TelegramStickerInfo {
+  fileId: string;
+  emoji: string;
+}
+
+/** A pack's sticker list is effectively static once published — callers are expected to cache this, not call it per-message. */
+export async function getTelegramStickerSet(token: string, setName: string): Promise<TelegramStickerInfo[]> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/getStickerSet`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: setName }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const data = (await res.json()) as { ok: boolean; description?: string; result?: { stickers: { file_id: string; emoji?: string }[] } };
+  if (!data.ok || !data.result) throw new Error(`getStickerSet failed: ${data.description ?? 'unknown'}`);
+  return data.result.stickers.map((s) => ({ fileId: s.file_id, emoji: s.emoji ?? '' }));
+}
+
 export interface MediaGroupItem {
   fileName: string;
   bytes: Buffer;

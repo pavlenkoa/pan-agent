@@ -31,6 +31,13 @@ export interface TelegramDocument {
   mime_type?: string;
 }
 
+export interface TelegramSticker {
+  file_id: string;
+  emoji?: string;
+  /** The pack's short name (e.g. from t.me/addstickers/<set_name>) — absent for a one-off sticker not part of any named set. */
+  set_name?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramFrom;
@@ -40,6 +47,7 @@ export interface TelegramMessage {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  sticker?: TelegramSticker;
 }
 
 export interface TelegramUpdate {

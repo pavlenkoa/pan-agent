@@ -155,3 +155,63 @@ export async function deletePersonSkill(slug: string, name: string): Promise<boo
   await rm(path.join(personSkillsDir(slug), name), { recursive: true, force: true });
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Sticker packs (/sticker_packs, /forget_sticker_pack, and auto-add when a
+// person forwards a sticker) — a small JSON file directly on the person's
+// claude-home NFS mount, same "runner reads it fresh, no pod restart needed"
+// shape as memories above. Must match STICKER_PACKS_FILE_NAME in
+// runner/sticker-store.ts (kept as a separate constant, not a cross-import,
+// same reasoning as MEMORY_DIR_NAME above).
+// ---------------------------------------------------------------------------
+
+const STICKER_PACKS_FILE_NAME = 'sticker-packs.json';
+
+export interface StickerPackInfo {
+  name: string;
+  addedAt: string; // ISO 8601
+}
+
+function stickerPacksFile(slug: string): string {
+  return path.join(NFS_MOUNT_PATH, 'people', slug, 'claude', STICKER_PACKS_FILE_NAME);
+}
+
+/** Top-level array only — the file is small and hand-written, no reason for a richer shape yet. */
+export async function listStickerPacks(slug: string): Promise<StickerPackInfo[]> {
+  let raw: string;
+  try {
+    raw = await readFile(stickerPacksFile(slug), 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter(
+    (v): v is StickerPackInfo => typeof v === 'object' && v !== null && typeof v.name === 'string' && typeof v.addedAt === 'string',
+  );
+}
+
+/** Dedups by name (case-sensitive — Telegram set names are, too). Returns `added: false` when the pack was already present. */
+export async function addStickerPack(slug: string, setName: string): Promise<{ added: boolean }> {
+  const packs = await listStickerPacks(slug);
+  if (packs.some((p) => p.name === setName)) return { added: false };
+  packs.push({ name: setName, addedAt: new Date().toISOString() });
+  await mkdir(path.dirname(stickerPacksFile(slug)), { recursive: true });
+  await writeFile(stickerPacksFile(slug), JSON.stringify(packs, null, 2));
+  return { added: true };
+}
+
+/** Removes one pack by exact name. Only ever removes a name that showed up in listStickerPacks — no path traversal surface (the name is never used as a path segment). */
+export async function removeStickerPack(slug: string, name: string): Promise<boolean> {
+  const packs = await listStickerPacks(slug);
+  const remaining = packs.filter((p) => p.name !== name);
+  if (remaining.length === packs.length) return false;
+  await writeFile(stickerPacksFile(slug), JSON.stringify(remaining, null, 2));
+  return true;
+}

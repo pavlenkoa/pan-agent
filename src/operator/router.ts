@@ -4,15 +4,16 @@
  * denied -> dropped silently. Admin DMs starting with a recognized command
  * are intercepted first.
  */
-import type { ChatAttachment } from '../shared/types.js';
+import type { ChatAttachment, PersonIndexEntry } from '../shared/types.js';
 import { log } from '../shared/log.js';
 import { tryHandleAdminCommand } from './admin-commands.js';
 import { enqueueChatMessage } from './delivery.js';
+import { addStickerPack } from './nfs.js';
 import { findSlugByTelegramUserId, readPeopleIndex, recordPending, touchLastSeen } from './people-index.js';
 import { tryHandlePersonCommand } from './person-commands.js';
 import { provisionPerson, slugifyForPerson, uniqueSlug } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
-import type { TelegramMessage, TelegramUpdate } from './telegram.js';
+import type { TelegramMessage, TelegramSticker, TelegramUpdate } from './telegram.js';
 
 /** Largest photo size is last in Telegram's array; documents pass through as-is. */
 function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined {
@@ -28,6 +29,32 @@ function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined 
     });
   }
   return attachments.length > 0 ? attachments : undefined;
+}
+
+/**
+ * A sticker the person sends the bot registers its whole pack (by
+ * `set_name`) for `send_sticker`/`list_stickers` to use, instead of
+ * becoming a turn — mirrors how `/set_var` etc. are intercepted before
+ * `enqueueChatMessage`. This is the answer to "I don't know how to find a
+ * sticker pack's id": just forward any sticker from it.
+ */
+async function handleIncomingSticker(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  sticker: TelegramSticker,
+): Promise<void> {
+  const setName = sticker.set_name;
+  if (!setName) {
+    await deps.telegram.sendMessage(person.chatId, "Цей стікер не належить до жодного паку — не можу його додати.");
+    return;
+  }
+  const { added } = await addStickerPack(slug, setName);
+  await deps.telegram.sendMessage(
+    person.chatId,
+    added ? `Додав пак стікерів "${setName}" 🎉` : `Пак "${setName}" вже доданий.`,
+  );
+  log.line('sticker_pack_added', { person: slug, setName, added });
 }
 
 export type { RouterDeps } from './router-deps.js';
@@ -53,6 +80,11 @@ export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Pro
   }
   const person = idx.people[slug];
   if (!person || person.status !== 'active') return;
+
+  if (msg.sticker) {
+    await handleIncomingSticker(deps, slug, person, msg.sticker);
+    return;
+  }
 
   const handled = await tryHandlePersonCommand(deps, slug, person, msg.text ?? '', update.update_id);
   if (handled) return;

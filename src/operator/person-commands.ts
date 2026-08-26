@@ -21,7 +21,7 @@ import {
   type PersonIndexEntry,
 } from '../shared/types.js';
 import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
-import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills } from './nfs.js';
+import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills, listStickerPacks, removeStickerPack } from './nfs.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
 import { podIp, recreatePod } from './pod-lifecycle.js';
 import { RESERVED_ENV_NAMES, RUNNER_PORT } from './pod-template.js';
@@ -94,6 +94,12 @@ export async function tryHandlePersonCommand(
       return true;
     case '/forget_skill':
       await handleForgetSkill(deps, slug, person, args, updateId);
+      return true;
+    case '/sticker_packs':
+      await handleListStickerPacks(deps, slug, person);
+      return true;
+    case '/forget_sticker_pack':
+      await handleForgetStickerPack(deps, slug, person, args, updateId);
       return true;
     case '/compact':
       await handleControlTurn(deps, slug, person, '/compact', updateId);
@@ -281,6 +287,48 @@ async function handleForgetSkill(
       person,
       updateId,
       `The person just ran /forget_skill on ${name} — that skill's SKILL.md is gone. If they ask about it, or if you still see a stale reference to it in your own memory notes, it's really deleted, not still there.`,
+    );
+  }
+}
+
+/**
+ * /sticker_packs and /forget_sticker_pack manage the same NFS-file list a
+ * forwarded sticker writes to (router.ts's handleIncomingSticker) — no pod
+ * restart either way, the runner (runner/sticker-store.ts) reads it fresh
+ * before every list_stickers/send_sticker tool call.
+ */
+async function handleListStickerPacks(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const packs = await listStickerPacks(slug);
+  if (packs.length === 0) {
+    await deps.telegram.sendMessage(person.chatId, 'No sticker packs yet — send me a sticker from a pack to add it.');
+    return;
+  }
+  const lines = packs.map((p) => `${p.name} — added ${p.addedAt}`);
+  await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
+}
+
+async function handleForgetStickerPack(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
+  const [name] = args;
+  if (!name) {
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /forget_sticker_pack <name> — see /sticker_packs for names.');
+    return;
+  }
+  const removed = await removeStickerPack(slug, name);
+  await deps.telegram.sendMessage(person.chatId, removed ? `Forgot the "${name}" sticker pack.` : `No such pack: ${name}`);
+  if (removed) {
+    log.line('sticker_pack_forgotten', { person: slug, name });
+    notifyModel(
+      deps,
+      slug,
+      person,
+      updateId,
+      `The person just ran /forget_sticker_pack on "${name}" — you can no longer send stickers from that pack.`,
     );
   }
 }

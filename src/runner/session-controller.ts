@@ -29,6 +29,7 @@ import {
 } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 import { createPushableQueue } from './pushable-queue.js';
+import type { ReactableMessageRef } from './telegram-extras-tools.js';
 
 /**
  * Everything `evt="turn_end"` logs besides `person`/`turn` (which the caller
@@ -118,6 +119,11 @@ export function createSessionController(
   // getter for either (confirmed: no getSettings()-equivalent on Query).
   let effortLevel: EffortLevel = 'medium';
   let contextLimit = DEFAULT_CONTEXT_LIMIT;
+  // The Telegram message a react_to_message tool call targets — only ever a
+  // real inbound chat message's id (see submitTurn below); explicitly
+  // cleared for synthetic pushes (task-notification replies, auto-compact)
+  // so the model can't accidentally react to a stale/unrelated message.
+  const reactable: ReactableMessageRef = { messageId: null };
 
   function isBusy(): boolean {
     return currentJob !== null;
@@ -193,6 +199,7 @@ export function createSessionController(
   }
 
   async function submitTurn(turn: TurnRequest, turnId: string): Promise<TurnResult> {
+    reactable.messageId = turn.kind === 'chat' ? (turn.messages.at(-1)?.messageId ?? null) : null;
     const promptText = buildPrompt(turn);
     const { text: userText, bytes: userBytes } = truncateText(promptText);
     log.line('user', { person: cfg.slug, turn: turnId, text: userText, bytes: userBytes });
@@ -255,6 +262,8 @@ export function createSessionController(
     const turnId = `bgtask:${reaction.taskId}:${Date.now()}`;
     const text = `[Background task ${reaction.taskId} ${reaction.status}]\n${reaction.summary}`;
     const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
+    reactable.messageId = null; // synthetic push, not a real inbound message
+
     try {
       const result = await startJob('task_notification', turnId, message);
       if (result.replyText.trim()) {
@@ -308,6 +317,7 @@ export function createSessionController(
   async function runAutoCompact(totalTokens: number): Promise<void> {
     const turnId = `auto-compact:${Date.now()}`;
     const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: '/compact' }, parent_tool_use_id: null };
+    reactable.messageId = null; // synthetic push, not a real inbound message
     const timer = setTimeout(() => timeoutControlTurn(turnId), controlTurnTimeoutMs);
     try {
       const result = await startJob('auto_compact', turnId, message);
@@ -367,7 +377,7 @@ export function createSessionController(
     while (!stopped) {
       try {
         sessionId = sessionId ?? (await readSavedSessionId(cfg));
-        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId) });
+        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable) });
         queryHandle = handle;
         await consumeQuery(handle);
         if (stopped) return;
