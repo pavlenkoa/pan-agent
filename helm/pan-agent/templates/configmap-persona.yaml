@@ -667,6 +667,19 @@ data:
     which account each finding belongs to. If a call fails with an auth-looking
     error, tell the person to run `/esputnik_connect <account>` again to renew it.
 
+    **Strictly read-only — same rule as `esputnik-query`.** This skill only ever
+    calls `list_workflows`, `get_messaging_analytics`, `get_events_analytics`,
+    `get_workflow_export`, and `get_event_types` — every one a lookup/export, never
+    a mutation. The `esputnik-<account>` MCP connection is OAuth-based and DOES
+    expose write tools (`create_*`, `update_*`, `delete_*`, `send_*`,
+    `subscribe_*`, `upsert_*`, `attach_*`/`detach_*`, `send_broadcast`,
+    `send_email_message`, etc., per CLAUDE.md's eSputnik section — "richer, read
+    AND write"), but none of them belong to this skill. Never call any tool
+    outside the five named above from this skill, no matter what the daily/weekly
+    procedure below seems to imply — pausing a broken workflow, resending a
+    campaign, or "fixing" anything found is explicitly out of scope. Report the
+    anomaly and stop; the person decides what to do about it.
+
     **Language & formatting:** every Telegram message this skill sends (daily
     alert, weekly report) is written in **Ukrainian**, concise, and formatted as
     normal Markdown (`**bold**`, short bullet lines, no headers) — the runner
