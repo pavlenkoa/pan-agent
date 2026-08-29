@@ -293,14 +293,25 @@ stdout to your log backend picks it up like any other pod.
   hardcoded to `media`.** `runner/index.ts`'s `installPersonaFiles` installs
   every `SKILL-<name>.md` key in the persona ConfigMap as
   `.claude/skills/<name>/SKILL.md` for every person (`media`, `esputnik-query`,
-  and `esputnik-trigger-monitor`, as of 2026-08-29). `operator/nfs.ts`'s
-  `SHARED_SKILL_NAMES` set has to be kept in sync with those same names —
-  it's what makes `/skills`/`/forget_skill` treat them as unremovable shared
-  state instead of misreporting them as person-authored. Adding another
-  shared skill means updating both places (and, per the eSputnik gotcha
-  above, only actually usable per-person once that person runs
-  `/esputnik_connect` themselves — installing the file everywhere doesn't
-  imply everyone has a working connection to use it with).
+  and `esputnik-trigger-monitor`, as of 2026-08-29). `/skills`/`/forget_skill`
+  need to know which names are shared (unremovable) vs. person-authored —
+  `operator/nfs.ts`'s `getSharedSkillNames` derives that set **live from the
+  ConfigMap's own keys** (`api.readNamespacedConfigMap` + a `SKILL-(.+)\.md`
+  regex over `data`), not a hardcoded list. This was a hardcoded `Set`
+  originally; changed 2026-08-29 specifically because a hardcoded list means
+  every new shared skill needs an operator *code change and image rebuild*
+  just to be recognized as shared, on top of the actual content change (a
+  ConfigMap/Helm edit alone is already enough for `installPersonaFiles` to
+  install it everywhere) — pure overhead for zero benefit. `listPersonSkills`/
+  `deletePersonSkill` still take the resulting `Set` as a plain argument
+  rather than fetching it themselves, so those two stay pure-filesystem and
+  directly unit-tested (per the testing convention above) with no k8s
+  mocking; only `getSharedSkillNames` itself touches the k8s API. Adding a
+  new shared skill is now a ConfigMap/Helm-only change — no code, no
+  rebuild — though per the eSputnik gotcha above it's only actually usable
+  per-person once that person runs `/esputnik_connect` themselves; installing
+  the file everywhere doesn't imply everyone has a working connection to use
+  it with.
 - **The Claude Code CLI's `mcpOAuth` credential store only recognizes a
   `<serverName>|<hash>`-keyed entry, never a bare `<serverName>` key.**
   Confirmed live 2026-08-29 building self-service eSputnik MCP OAuth

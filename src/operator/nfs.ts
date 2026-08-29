@@ -7,7 +7,10 @@
 import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { CoreV1Api } from '@kubernetes/client-node';
+
 import { ESPUTNIK_SERVER_URL } from '../shared/types.js';
+import { isNotFound } from './k8s.js';
 
 const NFS_MOUNT_PATH = process.env['NFS_MOUNT_PATH'] ?? '/mnt/pan-agent-nfs';
 
@@ -92,10 +95,33 @@ export async function deleteMemoryFile(slug: string, name: string): Promise<bool
 // Shared skills (one per `SKILL-<name>.md` key in the persona ConfigMap,
 // reinstalled on every boot by runner/index.ts's installPersonaFiles) are
 // deliberately excluded/unremovable here — they aren't this person's own
-// state. Keep this set in sync with the ConfigMap's `SKILL-*.md` keys.
+// state.
+//
+// The shared-name set is derived live from the ConfigMap's own keys
+// (`getSharedSkillNames` below), not hardcoded — a hardcoded list here
+// would mean every new shared skill needs an operator code change *and*
+// image rebuild just to be recognized as shared, on top of the actual
+// content change (a ConfigMap/Helm edit, which alone is enough for
+// `installPersonaFiles` to pick it up). This is the one function in this
+// otherwise plain-filesystem file that touches the k8s API — kept separate
+// from `listPersonSkills`/`deletePersonSkill` below (which take the
+// resulting `Set` as a plain argument) so those two stay pure-filesystem
+// and unit-testable exactly as before, no k8s mocking needed.
 // ---------------------------------------------------------------------------
 
-const SHARED_SKILL_NAMES = new Set(['media', 'esputnik-query', 'esputnik-trigger-monitor']);
+export async function getSharedSkillNames(api: CoreV1Api, namespace: string, personaConfigMapName: string): Promise<Set<string>> {
+  let data: Record<string, string> | undefined;
+  try {
+    const cm = await api.readNamespacedConfigMap({ name: personaConfigMapName, namespace });
+    data = cm.data;
+  } catch (err) {
+    if (!isNotFound(err)) throw err;
+  }
+  const names = Object.keys(data ?? {})
+    .map((key) => key.match(/^SKILL-(.+)\.md$/)?.[1])
+    .filter((name): name is string => name !== undefined);
+  return new Set(names);
+}
 
 function personSkillsDir(slug: string): string {
   return path.join(NFS_MOUNT_PATH, 'people', slug, 'workspace', '.claude', 'skills');
@@ -119,8 +145,8 @@ function parseSkillFrontmatter(content: string): { name?: string; description?: 
   return result;
 }
 
-/** Person-authored skills only — excludes shared skills, same framing as listMemoryFiles only ever showing this person's own state. */
-export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
+/** Person-authored skills only — excludes shared skills (see `getSharedSkillNames`), same framing as listMemoryFiles only ever showing this person's own state. */
+export async function listPersonSkills(slug: string, sharedNames: Set<string>): Promise<SkillInfo[]> {
   let entries: string[];
   try {
     entries = await readdir(personSkillsDir(slug));
@@ -130,7 +156,7 @@ export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
   }
   const skills = await Promise.all(
     entries
-      .filter((name) => !SHARED_SKILL_NAMES.has(name))
+      .filter((name) => !sharedNames.has(name))
       .map(async (name) => {
         const skillMdPath = path.join(personSkillsDir(slug), name, 'SKILL.md');
         let content: string;
@@ -150,9 +176,9 @@ export async function listPersonSkills(slug: string): Promise<SkillInfo[]> {
 }
 
 /** Recursively deletes one person-authored skill by directory name. Only ever deletes a name that showed up in listPersonSkills — no path traversal surface, and a shared skill can never be targeted this way. */
-export async function deletePersonSkill(slug: string, name: string): Promise<boolean> {
-  if (SHARED_SKILL_NAMES.has(name)) return false;
-  const skills = await listPersonSkills(slug);
+export async function deletePersonSkill(slug: string, name: string, sharedNames: Set<string>): Promise<boolean> {
+  if (sharedNames.has(name)) return false;
+  const skills = await listPersonSkills(slug, sharedNames);
   if (!skills.some((s) => s.name === name)) return false;
   await rm(path.join(personSkillsDir(slug), name), { recursive: true, force: true });
   return true;

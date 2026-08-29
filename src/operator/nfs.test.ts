@@ -128,8 +128,10 @@ describe('deleteMemoryFile', () => {
 });
 
 describe('listPersonSkills', () => {
+  const shared = new Set(['media']);
+
   it('returns an empty list when the skills dir does not exist yet', async () => {
-    expect(await listPersonSkills('nobody')).toEqual([]);
+    expect(await listPersonSkills('nobody', shared)).toEqual([]);
   });
 
   it('lists a skill and parses its frontmatter description', async () => {
@@ -140,7 +142,7 @@ describe('listPersonSkills', () => {
       '---\nname: esputnik\ndescription: Recipes for the eSputnik API.\n---\n\nBody here.\n',
     );
 
-    const skills = await listPersonSkills('andrii');
+    const skills = await listPersonSkills('andrii', shared);
     expect(skills).toEqual([
       { name: 'esputnik', description: 'Recipes for the eSputnik API.', modifiedAt: expect.any(String) },
     ]);
@@ -151,7 +153,7 @@ describe('listPersonSkills', () => {
     await mkdir(mediaDir, { recursive: true });
     await writeFile(path.join(mediaDir, 'SKILL.md'), '# Media Management Skill\n');
 
-    expect(await listPersonSkills('andrii2')).toEqual([]);
+    expect(await listPersonSkills('andrii2', shared)).toEqual([]);
   });
 
   it('is scoped per person — one person\'s skills never show up for another', async () => {
@@ -159,29 +161,31 @@ describe('listPersonSkills', () => {
     await mkdir(skillDir, { recursive: true });
     await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: secret-skill\ndescription: private\n---\n');
 
-    expect(await listPersonSkills('someone-else')).toEqual([]);
+    expect(await listPersonSkills('someone-else', shared)).toEqual([]);
   });
 
   it('skips a skill directory with no SKILL.md', async () => {
     const emptyDir = path.join(dir, 'people', 'marta2', 'workspace', '.claude', 'skills', 'empty');
     await mkdir(emptyDir, { recursive: true });
 
-    expect(await listPersonSkills('marta2')).toEqual([]);
+    expect(await listPersonSkills('marta2', shared)).toEqual([]);
   });
 });
 
 describe('deletePersonSkill', () => {
+  const shared = new Set(['media']);
+
   it('deletes a skill directory that exists and reports it removed', async () => {
     const skillDir = path.join(dir, 'people', 'marta3', 'workspace', '.claude', 'skills', 'to-delete');
     await mkdir(skillDir, { recursive: true });
     await writeFile(path.join(skillDir, 'SKILL.md'), '---\nname: to-delete\ndescription: x\n---\n');
 
-    expect(await deletePersonSkill('marta3', 'to-delete')).toBe(true);
-    expect(await listPersonSkills('marta3')).toEqual([]);
+    expect(await deletePersonSkill('marta3', 'to-delete', shared)).toBe(true);
+    expect(await listPersonSkills('marta3', shared)).toEqual([]);
   });
 
   it('returns false for a name that is not an actual listed skill (no path traversal)', async () => {
-    expect(await deletePersonSkill('marta3', '../../../etc')).toBe(false);
+    expect(await deletePersonSkill('marta3', '../../../etc', shared)).toBe(false);
   });
 
   it('refuses to delete the shared media skill even if asked by exact name', async () => {
@@ -189,7 +193,7 @@ describe('deletePersonSkill', () => {
     await mkdir(mediaDir, { recursive: true });
     await writeFile(path.join(mediaDir, 'SKILL.md'), '# Media Management Skill\n');
 
-    expect(await deletePersonSkill('marta4', 'media')).toBe(false);
+    expect(await deletePersonSkill('marta4', 'media', shared)).toBe(false);
     // still on disk
     const remaining = await readFile(path.join(mediaDir, 'SKILL.md'), 'utf8');
     expect(remaining).toContain('Media Management Skill');
@@ -198,7 +202,7 @@ describe('deletePersonSkill', () => {
   it('returns false for a nonexistent skill in an existing skills dir', async () => {
     const skillsDir = path.join(dir, 'people', 'marta3', 'workspace', '.claude', 'skills');
     await mkdir(skillsDir, { recursive: true });
-    expect(await deletePersonSkill('marta3', 'does-not-exist')).toBe(false);
+    expect(await deletePersonSkill('marta3', 'does-not-exist', shared)).toBe(false);
   });
 });
 

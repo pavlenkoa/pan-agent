@@ -22,7 +22,15 @@ import {
 } from '../shared/types.js';
 import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
 import { beginEsputnikConnect } from './esputnik-oauth.js';
-import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills, listStickerPacks, removeStickerPack } from './nfs.js';
+import {
+  deleteMemoryFile,
+  deletePersonSkill,
+  getSharedSkillNames,
+  listMemoryFiles,
+  listPersonSkills,
+  listStickerPacks,
+  removeStickerPack,
+} from './nfs.js';
 import { postControl } from './pod-control.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
@@ -259,12 +267,14 @@ async function handleForgetMemory(
  * the NFS workspace mount (operator/nfs.ts), same as /memories/forget_memory
  * — no pod restart needed either way, and the SDK itself picks up filesystem
  * changes under .claude/skills/ live, mid-session, on its own (confirmed
- * against the installed SDK before relying on it). Shared skills (`media`,
- * `esputnik-query`) are never listed or deletable here — they aren't this
- * person's own state.
+ * against the installed SDK before relying on it). Shared skills (derived
+ * live from the persona ConfigMap's own `SKILL-*.md` keys — see
+ * `getSharedSkillNames`, not a hardcoded list) are never listed or
+ * deletable here — they aren't this person's own state.
  */
 async function handleListSkills(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
-  const skills = await listPersonSkills(slug);
+  const sharedNames = await getSharedSkillNames(deps.api, deps.cfg.namespace, deps.cfg.personaConfigMapName);
+  const skills = await listPersonSkills(slug, sharedNames);
   if (skills.length === 0) {
     await deps.telegram.sendMessage(person.chatId, 'No custom skills yet.');
     return;
@@ -285,7 +295,8 @@ async function handleForgetSkill(
     await deps.telegram.sendMessage(person.chatId, 'Usage: /forget_skill <name> — see /skills for names.');
     return;
   }
-  const removed = await deletePersonSkill(slug, name);
+  const sharedNames = await getSharedSkillNames(deps.api, deps.cfg.namespace, deps.cfg.personaConfigMapName);
+  const removed = await deletePersonSkill(slug, name, sharedNames);
   await deps.telegram.sendMessage(person.chatId, removed ? `Forgot the ${name} skill.` : `No such skill: ${name}`);
   if (removed) {
     log.line('skill_forgotten', { person: slug, name });
