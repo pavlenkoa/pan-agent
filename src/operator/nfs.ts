@@ -95,7 +95,7 @@ export async function deleteMemoryFile(slug: string, name: string): Promise<bool
 // state. Keep this set in sync with the ConfigMap's `SKILL-*.md` keys.
 // ---------------------------------------------------------------------------
 
-const SHARED_SKILL_NAMES = new Set(['media', 'esputnik-query']);
+const SHARED_SKILL_NAMES = new Set(['media', 'esputnik-query', 'esputnik-trigger-monitor']);
 
 function personSkillsDir(slug: string): string {
   return path.join(NFS_MOUNT_PATH, 'people', slug, 'workspace', '.claude', 'skills');

@@ -292,12 +292,15 @@ stdout to your log backend picks it up like any other pod.
 - **Shared skills: one `SKILL-<name>.md` ConfigMap key per skill, not
   hardcoded to `media`.** `runner/index.ts`'s `installPersonaFiles` installs
   every `SKILL-<name>.md` key in the persona ConfigMap as
-  `.claude/skills/<name>/SKILL.md` for every person (media and
-  esputnik-query, as of 2026-08-23). `operator/nfs.ts`'s `SHARED_SKILL_NAMES`
-  set has to be kept in sync with those same names — it's what makes
-  `/skills`/`/forget_skill` treat them as unremovable shared state instead of
-  misreporting them as person-authored. Adding a third shared skill means
-  updating both places.
+  `.claude/skills/<name>/SKILL.md` for every person (`media`, `esputnik-query`,
+  and `esputnik-trigger-monitor`, as of 2026-08-29). `operator/nfs.ts`'s
+  `SHARED_SKILL_NAMES` set has to be kept in sync with those same names —
+  it's what makes `/skills`/`/forget_skill` treat them as unremovable shared
+  state instead of misreporting them as person-authored. Adding another
+  shared skill means updating both places (and, per the eSputnik gotcha
+  above, only actually usable per-person once that person runs
+  `/esputnik_connect` themselves — installing the file everywhere doesn't
+  imply everyone has a working connection to use it with).
 - **The Claude Code CLI's `mcpOAuth` credential store only recognizes a
   `<serverName>|<hash>`-keyed entry, never a bare `<serverName>` key.**
   Confirmed live 2026-08-29 building self-service eSputnik MCP OAuth
@@ -371,7 +374,9 @@ SDK `Skill`-tool invocation, plus `/skills`/`/forget_skill` for oversight —
 same shape as the memory work, no ConfigMap involved). **Shared** skills are
 now a generalized, N-skill mechanism (one `SKILL-<name>.md` ConfigMap key
 each) rather than hardcoded to `media` alone — `esputnik-query` (read-only
-eSputnik API queries) is the second one, added 2026-08-23. Session
+eSputnik REST queries, added 2026-08-23) and `esputnik-trigger-monitor`
+(scheduled trigger-campaign flatline detection via the OAuth MCP analytics
+tools, added 2026-08-29) are the second and third. Session
 management is now person-facing too: `/context` (live token-usage snapshot),
 `/effort` (session-scoped effort level), `/context_limit` (app-enforced
 auto-compact ceiling, default 250,000 — the SDK's own internal ceiling scales

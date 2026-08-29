@@ -96,9 +96,9 @@ data:
     never see the value), then reference it in the skill by name only, e.g. `$ESPUTNIK_TOKEN` —
     exactly like the media skill already does with `$EMBY_API_KEY`.
 
-    `media` and `esputnik-query` are reserved — those are shared skills installed fresh on every
-    restart. Never create or overwrite a skill under either name; it would just get silently
-    clobbered on the next restart.
+    `media`, `esputnik-query`, and `esputnik-trigger-monitor` are reserved — those are shared
+    skills installed fresh on every restart. Never create or overwrite a skill under any of
+    these names; it would just get silently clobbered on the next restart.
 
     `/skills` and `/forget_skill` are commands the person runs directly, same as `/memories` and
     `/forget_memory` above — you never see those messages, only a `[System note: ...]` afterward if
@@ -285,6 +285,7 @@ data:
 
     - **Self-service OAuth MCP tools** (richer — read AND write: send campaigns, manage contacts/segments, broadcasts, not just read-only). If the person has connected an account via `/esputnik_connect <account>`, you already have live tools named `mcp__esputnik-<account>__...` (e.g. `mcp__esputnik-work__get_account_info`) — use these directly, they need no setup from you. A person can have several accounts connected at once, each with its own tool prefix; ask which account if it's ambiguous. If they ask about eSputnik but you don't see any `mcp__esputnik-*` tools listed, tell them to run `/esputnik_connect <account>` (a short label they choose, e.g. `work`) — it walks them through connecting their own account, no admin involved. If a call to one of these tools fails with an auth-looking error, the connection likely needs renewing — tell them to run `/esputnik_connect <account>` again (same command works for a fresh connect or a renewal).
     - **Basic-Auth read-only query skill** (older, narrower — read-only, requires the person to `/set_var` their own credentials first) — read `.claude/skills/esputnik-query/SKILL.md` in the workspace for setup and recipes. Only fall back to this for an account that hasn't been connected via `/esputnik_connect`.
+    - **Trigger-campaign flatline monitor** (`.claude/skills/esputnik-trigger-monitor/SKILL.md`) — a scheduled (not ad-hoc) check for a trigger email campaign that silently stopped sending. Needs the OAuth MCP connection (same as the first bullet, not the REST skill). Not something to run proactively in chat — only fires via the two `schedule_task` entries the person sets up themselves (see the skill file for the exact cron/prompt shape); read it if they ask to set this monitor up or change how it behaves.
 
     Prefer the MCP tools whenever they're available for the account in question.
 
@@ -626,5 +627,238 @@ data:
       (support-ticket gated, blocked as of 2026-08-23). Say plainly that this needs the
       eSputnik support ticket, don't fabricate an answer from a partial contact list.
     - Aggregate campaign stats (opens/clicks totals, revenue) — no REST endpoint found;
-      only exists via the MCP-only, T-1-lagged `get_messaging_analytics`, unverified.
+      only exists via the MCP-only `get_messaging_analytics`/`get_events_analytics`
+      (confirmed live 2026-08-29 — see the `esputnik-trigger-monitor` skill, which
+      uses exactly these calls for anomaly detection; reach for that skill instead
+      of trying to replicate its analytics calls here via REST).
     - Any write: editing a template, workflow, segment membership, or contact field.
+  SKILL-esputnik-trigger-monitor.md: |
+    ---
+    name: esputnik-trigger-monitor
+    description: Detects eSputnik trigger email campaigns that silently stopped sending (steady baseline volume for weeks, then flatlined to ~0) and identifies whether the root cause is the underlying event no longer firing or just the email step breaking. Runs on two scheduled tasks (daily check, weekly report) — use whenever a scheduled-task prompt references this skill, or if the person asks to check eSputnik trigger campaigns for anomalies.
+    ---
+
+    # eSputnik trigger-email failure monitor
+
+    ## Why this exists
+
+    Trigger campaigns (order confirmations, recommendations, reclamations, etc.) are
+    fired by backend events. Sometimes the event silently stops firing — nobody
+    notices until someone opens a report weeks later and finds a campaign that used
+    to send thousands of emails a week sending ~0 for days. This skill catches that
+    automatically: "was steadily non-zero for a long baseline, then collapsed to
+    near-zero and stayed there."
+
+    Account-agnostic, like `esputnik-query` — but this one needs the **OAuth MCP**
+    connection (`/esputnik_connect <account>`), not `esputnik-query`'s Basic-Auth
+    REST credentials, because the analytics calls below (`get_messaging_analytics`,
+    `get_events_analytics`, `get_workflow_export`, `get_event_types`) only exist
+    as MCP tools, confirmed live 2026-08-29 — no equivalent REST endpoint exists
+    (this is exactly what `esputnik-query`'s own "what this skill will not answer"
+    section already flagged as unverified; now confirmed).
+
+    Before running either check, look for tools named `mcp__esputnik-<account>__...`
+    in your toolset — that `<account>` label is whatever the person chose when they
+    ran `/esputnik_connect`. If none exist, don't guess an account name — tell the
+    person to run `/esputnik_connect <account>` first (see CLAUDE.md's eSputnik
+    section), then stop; there's nothing to check yet. If more than one account is
+    connected, run the whole daily/weekly procedure once per account (each has its
+    own tool prefix and its own state file — see `State file` below), and mention
+    which account each finding belongs to. If a call fails with an auth-looking
+    error, tell the person to run `/esputnik_connect <account>` again to renew it.
+
+    **Language & formatting:** every Telegram message this skill sends (daily
+    alert, weekly report) is written in **Ukrainian**, concise, and formatted as
+    normal Markdown (`**bold**`, short bullet lines, no headers) — the runner
+    auto-converts Markdown to Telegram HTML on send (`telegram-send.ts`), so bold
+    campaign names and compact bullets render properly without writing raw HTML.
+    Keep every message short: a handful of bold labels and numbers per campaign,
+    never prose paragraphs, never a wall of text. If nothing is anomalous, no
+    message is sent at all (see below) — silence is the concise option.
+
+    ## Config (edit these directly in this file if the person asks to change them)
+
+    - `CHECK_CRON`: currently `0 20 * * *` (Europe/Kyiv, once daily at 20:00) — the
+      person said this is deliberately theirs to change; if they ask for a
+      different time or frequency, tell them the exact `cancel_task`/`schedule_task`
+      calls needed (see "Changing the schedule" below) rather than just updating
+      this file, since the actual firing schedule lives in the operator's task
+      store, not here.
+    - `WEEKLY_CRON`: currently `0 12 * * 6` (Europe/Kyiv, Saturday at 12:00).
+    - `WEEKLY_REPORT_MODE`: `always` (default — send an "all clear" summary every
+      week even with zero anomalies). The person can say "don't send the weekly
+      report if there's nothing to report" — if so, change this line to `silent`
+      and use the silent branch in the weekly report section below.
+    - `BASELINE_WINDOW_DAYS`: 36
+    - `RECENT_WINDOW_DAYS`: 3
+    - `MIN_BASELINE_DAILY_DELIVERED`: 15 (ignore campaigns too low-volume to judge)
+    - `DROP_RATIO_THRESHOLD`: 0.15 (flag when recent daily average falls below 15%
+      of the baseline daily average)
+    - State file: `esputnik-monitor-state-<account>.json` in the workspace root (create with
+      `{"activeAlerts": {}, "weekLog": []}` if it doesn't exist yet).
+
+    ## Confirmed live behavior of the relevant eSputnik MCP tools (2026-08-29)
+
+    - `get_messaging_analytics` and `get_events_analytics` return **one aggregate
+      row per date range per entity** — there is no per-day bucketing available.
+      To compare "baseline" vs "recent" you make **two separate calls** with two
+      different `date_from`/`date_to` windows, not one call with a breakdown
+      param. Max span per call is 185 days.
+    - Both tools return a manifest with an `artifacts[].downloadUrl` (a signed CSV
+      URL, ~5 minute expiry) — not inline data. Fetch it immediately with
+      `WebFetch` (prompt: "Return the full raw CSV content verbatim, all rows, no
+      summarization") right after the tool call, don't stash the URL for later.
+    - `message_ids`, `workflow_ids`, `event_type_ids` are real, working filters on
+      these two tools. The generic `query` object accepted by `list_workflows`,
+      `list_broadcasts`, and `list_email_messages` does **not** filter
+      server-side (confirmed live: identical full results regardless of what's
+      passed) — fetch the unfiltered list and filter client-side instead.
+    - `get_workflow_export(workflow_id)` returns `startConfig.eventTypeTrigger`
+      (`eventTypeId` + `eventTypeName`) **inline**, in the JSON response itself —
+      you don't need to download the full RawJson graph artifact just to find
+      what event starts a workflow.
+    - `get_messaging_analytics` grouped by `message` returns one row per
+      workflow/callout/message with `sent, delivered, opened, clicked, spam,
+      bounced, unsubscribed, orders` — `delivered` is the volume metric to use
+      (matches what the eSputnik report UI plots as "Доставлено").
+    - **Dry run confirmed live 2026-08-29** (real account data, no state file,
+      nothing sent): of ~30 active campaigns above the volume floor, exactly two
+      flatlined to 0 in the recent window. One (`Preprocessor`/`hit_orders`) was
+      a false positive — a `REGULAR`-trigger monthly blast that only ever ran
+      ~8 days a month by design, not a broken continuous campaign; the naive
+      ratio test alone would have wrongly alerted on it. The other
+      (`ThemeNewArrivalsOffer`) was a real, confirmed anomaly: `get_event_types`
+      showed the underlying event type itself marked `inactive: true` in
+      eSputnik — a stronger, definitive signal than inferring from volume alone.
+      Both findings are why step 7 checks `startConfig.trigger` before alerting,
+      and checks `get_event_types`'s `inactive` flag before falling back to a
+      volume-ratio inference.
+
+    ## Daily check (fires on `CHECK_CRON`)
+
+    1. Compute (Europe/Kyiv dates, `TODAY` = the day this task fires):
+       - Recent window: `date_from = TODAY-3`, `date_to = TODAY-1` (3 full days,
+         excludes today since it's partial at a 20:00 check).
+       - Baseline window: `date_from = TODAY-39`, `date_to = TODAY-4` (36 full
+         days, ending right before the recent window starts).
+    2. Load the state file (create it if missing).
+    3. `mcp__esputnik-<account>__list_workflows` → keep only entries with
+       `status == "active"` → this is the active-workflow set (id → name). A
+       campaign whose workflow is inactive/paused is expected to be at 0 —
+       never flag it.
+    4. `mcp__esputnik-<account>__get_messaging_analytics(group_by="message",
+       media_types=["email"], date_from=<baseline start>, date_to=<baseline
+       end>, order_by="sent")` → WebFetch the CSV → this is the baseline table.
+    5. Same call with the recent window → WebFetch the CSV → this is the recent
+       table.
+    6. For every row in the baseline table whose `workflow_id` is in the
+       active-workflow set and whose `delivered / BASELINE_WINDOW_DAYS >=
+       MIN_BASELINE_DAILY_DELIVERED`:
+       - Find the matching `message_id` in the recent table (0 if it doesn't
+         appear at all).
+       - `recent_daily = recent_delivered / RECENT_WINDOW_DAYS`,
+         `baseline_daily = baseline_delivered / BASELINE_WINDOW_DAYS`.
+       - If `recent_daily <= DROP_RATIO_THRESHOLD * baseline_daily` → candidate
+         anomaly.
+    7. For each candidate not already in `state.activeAlerts` (a genuinely new
+       drop, or one that had previously recovered and has now dropped again):
+       - **Check the trigger type first —** `mcp__esputnik-<account>__get_workflow_export(workflow_id)`
+         → read `startConfig.trigger`.
+         - `"REGULAR"` (a `regularTrigger`: cron/schedule-driven, e.g. a monthly
+           or weekly batch blast) → **do not alert.** These are expected to run
+           in bursts by design (confirmed live: a real campaign, "Preprocessor",
+           sent ~20k emails across ~8 days then legitimately nothing for the
+           next 3 weeks — a naive baseline/recent ratio flags this as a
+           flatline when it's just the schedule). Record it in
+           `state.weekLog` as `skipped_regular_trigger` (so it's visible in
+           review, never silently dropped from history) and move on to the next
+           candidate — no Telegram alert, no `activeAlerts` entry.
+         - `"BY_EVENT"` → this is a real continuously-triggered campaign, proceed
+           below.
+       - Narrow down when it started: run 2–3 more
+         `get_messaging_analytics(message_ids=[id], ...)` calls over narrower
+         windows inside the last ~2 weeks (e.g. week-by-week) to estimate the
+         approximate date `delivered` collapsed.
+       - Find root cause: read `startConfig.eventTypeTrigger.eventTypeId`/
+         `eventTypeName` from the same `get_workflow_export` response above (no
+         extra call needed). If present:
+         - First check `mcp__esputnik-<account>__get_event_types(event_type_ids=[that id],
+           include_inactive=true)` → this is the strongest signal: eSputnik's
+           own `inactive` flag on the event type itself. `inactive: true` means
+           root cause is confirmed, not inferred — someone (or something)
+           deactivated the event.
+         - If the event type is still `inactive: false`, fall back to the
+           volume check: run `get_events_analytics(event_type_ids=[that id],
+           ...)` for the same baseline and recent windows and apply the same
+           ratio test.
+           - Event also collapsed the same way → root cause is the event no
+             longer firing (the deeper problem — e.g. `orderIN_PROGRESS`-style
+             backend event stopped, without formally being marked inactive).
+           - Event volume is normal but the campaign flatlined → root cause is
+             the workflow/email step itself (paused, broken condition, etc.),
+             not the event.
+       - Add to `state.activeAlerts[message_id] = {firstDetected, workflowId,
+         workflowName, subject, baselineDaily, recentDaily, rootCauseEventKey,
+         rootCauseHealthy}`.
+       - Append a compact entry to `state.weekLog`.
+    8. For any `message_id` in `state.activeAlerts` that did **not** get flagged
+       this run (recent volume is back to normal) → remove it from
+       `activeAlerts` and append a short "recovered" entry to `state.weekLog`.
+    9. Save the state file.
+    10. If step 7 found anything genuinely new this run, send one Telegram
+        message in Ukrainian, listing every new anomaly. Keep it to a few bold
+        lines per campaign — no prose, no explanations beyond the facts below:
+
+        ```
+        ⚠️ **<workflow name>** — розсилка зупинилась
+        Було ~<baseline_daily>/день, зараз ~<recent_daily>/день. Падіння з <estimated date>.
+        Причина: <"подію <eventTypeName> деактивовано в eSputnik" (inactive:true, confirmed) АБО
+        "подія <eventTypeName> теж перестала спрацьовувати" (volume ratio, inferred) АБО
+        "подія <eventTypeName> працює нормально — схоже, зламався сам крок листа" АБО
+        "тригер-подію не знайдено (запускається за розкладом)">
+        ```
+
+        Repeat that 3-line block per new anomaly, separated by a blank line —
+        nothing else in the message (no greeting, no summary paragraph). If
+        nothing new was found this run (whether zero anomalies exist at all, or
+        the only anomalies are ones already alerted on a previous run), reply
+        with exactly `NO_UPDATE` and nothing else.
+
+    ## Weekly report (fires on `WEEKLY_CRON`)
+
+    1. Load the state file's `weekLog` (this week's new/recovered anomaly
+       entries) and current `activeAlerts` (still-open issues).
+    2. Compose a short summary **in Ukrainian**, Markdown, one bold line per
+       item — no paragraphs, no restating numbers already sent this week:
+
+       ```
+       📊 **Тижневий звіт: тригерні розсилки**
+       Нові проблеми: <N> <— one bold campaign name per line, or "немає" if 0>
+       Відновились: <N> <— campaign names, or "немає">
+       Досі не вирішено: <N> <— campaign names, or "немає">
+       ```
+
+       That's the whole message — four lines plus names, never more. Don't
+       repeat the full root-cause/date detail already sent in the daily alert;
+       this is a tally, not a re-explanation.
+    3. If `WEEKLY_REPORT_MODE` is `always` (the default): send it every time,
+       even when everything is clean — all three counts read "немає". This is a
+       standing check-in, not conditional on findings.
+    4. If `WEEKLY_REPORT_MODE` is `silent`: only send when `weekLog` is
+       non-empty or `activeAlerts` is non-empty; otherwise reply with exactly
+       `NO_UPDATE` and nothing else.
+    5. Clear `weekLog` after sending (keep `activeAlerts` — those are still-open
+       issues, not weekly history).
+
+    ## Changing the schedule
+
+    The cron/time actually lives in the operator's task store, set via the
+    `schedule_task` tool — editing the `CHECK_CRON`/`WEEKLY_CRON` values in this
+    file's Config section is documentation, not the live setting. To actually
+    change timing:
+
+    1. `list_tasks` to find the current task's id.
+    2. `cancel_task(taskId)`.
+    3. `schedule_task(cron=<new cron>, tz="Europe/Kyiv", prompt=<same prompt as
+       before>)`.
+    4. Update this file's Config section to match, so it stays accurate.
