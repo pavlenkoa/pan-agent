@@ -321,6 +321,30 @@ stdout to your log backend picks it up like any other pod.
   OAuth-based MCP server gets added, the same value can't be assumed — it'd
   need rediscovering the same way (write a token under the bare name first,
   let the SDK generate its own broken stub, read back the key it chose).
+- **eSputnik's analytics MCP tools (`get_messaging_analytics`,
+  `get_events_analytics`) return one aggregate row per date range, never a
+  time series.** Confirmed live 2026-08-29 building a trigger-email
+  flatline monitor: there is no per-day bucketing param on either tool, and
+  the returned CSV has no date column — comparing "baseline" vs "recent"
+  requires two separate calls with two different `date_from`/`date_to`
+  windows (max span 185 days each), not one call with a granularity
+  argument. Both tools return a manifest with a signed `artifacts[].downloadUrl`
+  (short-lived, ~5 min) rather than inline data — fetch it immediately
+  (e.g. via `WebFetch`), don't stash the URL. `message_ids`/`workflow_ids`/
+  `event_type_ids` are real server-side filters on these two tools, but the
+  generic `query` object accepted by `list_workflows`/`list_broadcasts`/
+  `list_email_messages` is **not** — confirmed live it returns identical
+  full results regardless of what's passed, so filter those lists
+  client-side instead. `get_workflow_export(workflow_id)` returns
+  `startConfig` inline (no need to download the full RawJson graph just to
+  find what starts a workflow), and `startConfig.trigger` is not always
+  `"BY_EVENT"` — a `"REGULAR"` value means a cron/schedule-driven batch
+  campaign (a `regularTrigger`), which can legitimately run in bursts (e.g.
+  a monthly blast active ~8 days a month, silent the rest) and must be
+  excluded from any naive baseline-vs-recent volume-drop check, or it reads
+  as a false-positive failure. `get_event_types` carries its own `inactive`
+  flag per event type — a stronger, definitive root-cause signal than
+  inferring "event stopped" from volume alone.
 
 ## Non-goals (deferred, not forgotten)
 
