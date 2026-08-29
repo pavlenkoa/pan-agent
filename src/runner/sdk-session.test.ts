@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { turnKey } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
-import { buildPrompt, NO_UPDATE_MARKER, personaChangedSinceLastAck, resolveReplyText } from './sdk-session.js';
+import {
+  buildPrompt,
+  NO_UPDATE_MARKER,
+  personaChangedSinceLastAck,
+  readEsputnikMcpServers,
+  resolveReplyText,
+} from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
   it('returns the bare command with no prefix, regardless of chatId', () => {
@@ -269,5 +275,76 @@ describe('personaChangedSinceLastAck', () => {
 describe('turnKey', () => {
   it('gives control turns their own dedup namespace, keyed by updateId', () => {
     expect(turnKey({ kind: 'control', updateId: 7, chatId: 42, command: '/compact' })).toBe('ctl:7');
+  });
+});
+
+describe('readEsputnikMcpServers', () => {
+  let dir: string;
+  let cfg: RunnerConfig;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-esputnik-'));
+    cfg = {
+      slug: 'test',
+      chatId: 1,
+      tz: 'UTC',
+      port: 8080,
+      operatorTasksUrl: 'http://operator.invalid',
+      tasksToken: 'test-token',
+      telegramBotToken: 'bot-token',
+      journalDir: dir,
+      workspaceCwd: dir,
+      claudeHome: dir,
+      sessionIdFile: path.join(dir, 'session-id'),
+      customVarsDoc: [],
+    };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns no servers when .credentials.json does not exist yet', async () => {
+    expect(await readEsputnikMcpServers(cfg)).toEqual({});
+  });
+
+  it('returns one http server entry per connected account, ignoring unrelated mcpOAuth entries', async () => {
+    await writeFile(
+      path.join(dir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: 'main' },
+        mcpOAuth: {
+          'esputnik-work': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' },
+          'esputnik-personal': { serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' },
+          'some-other-server': { serverName: 'some-other-server', serverUrl: 'https://example.com' },
+        },
+      }),
+    );
+
+    const servers = await readEsputnikMcpServers(cfg);
+    expect(Object.keys(servers).sort()).toEqual(['esputnik-personal', 'esputnik-work']);
+    expect(servers['esputnik-work']).toMatchObject({ type: 'http', url: 'https://mcp.esputnik.com' });
+  });
+
+  it('recognizes a `serverKey|<hash>`-suffixed key too, deduping to the bare serverKey', async () => {
+    await writeFile(
+      path.join(dir, '.credentials.json'),
+      JSON.stringify({ mcpOAuth: { 'esputnik-work|abc123': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+    );
+
+    const servers = await readEsputnikMcpServers(cfg);
+    expect(Object.keys(servers)).toEqual(['esputnik-work']);
+  });
+
+  it('gives every entry a fully-enumerated tool policy (no wildcard support in the installed SDK)', async () => {
+    await writeFile(
+      path.join(dir, '.credentials.json'),
+      JSON.stringify({ mcpOAuth: { 'esputnik-work': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+    );
+
+    const servers = await readEsputnikMcpServers(cfg);
+    const config = servers['esputnik-work'] as { tools?: { name: string; permission_policy?: string }[] };
+    expect(config.tools?.length).toBeGreaterThan(50);
+    expect(config.tools).toContainEqual({ name: 'get_account_info', permission_policy: 'always_allow' });
   });
 });

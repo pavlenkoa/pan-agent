@@ -53,6 +53,10 @@ spec:
               value: pan-agent-persona
             - name: TASKS_API_PORT
               value: {{ .Values.operator.tasksApiPort | quote }}
+            - name: OAUTH_CALLBACK_PORT
+              value: {{ .Values.operator.oauthCallbackPort | quote }}
+            - name: PUBLIC_CALLBACK_HOST
+              value: {{ .Values.operator.publicCallbackHost | quote }}
             - name: DEFAULT_TZ
               value: {{ .Values.defaultTz | quote }}
             - name: TELEGRAM_BOT_TOKEN
@@ -73,6 +77,8 @@ spec:
           ports:
             - name: tasks-api
               containerPort: {{ .Values.operator.tasksApiPort }}
+            - name: oauth-callback
+              containerPort: {{ .Values.operator.oauthCallbackPort }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
           volumeMounts:
@@ -96,3 +102,6 @@ spec:
     - name: tasks-api
       port: {{ .Values.operator.tasksApiPort }}
       targetPort: {{ .Values.operator.tasksApiPort }}
+    - name: oauth-callback
+      port: {{ .Values.operator.oauthCallbackPort }}
+      targetPort: {{ .Values.operator.oauthCallbackPort }}

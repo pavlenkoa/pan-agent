@@ -113,15 +113,33 @@ export interface ContextUsageSummary {
   contextLimit: number;
 }
 
+/** One eSputnik MCP server's live connection health, from the SDK's own `mcpServerStatus()`. */
+export interface EsputnikServerStatus {
+  serverKey: string;
+  status: string;
+}
+
 export type ControlRequest =
   | { action: 'context' }
   | { action: 'set_effort'; level: EffortLevel }
-  | { action: 'set_context_limit'; tokens: number };
+  | { action: 'set_context_limit'; tokens: number }
+  /**
+   * One action whether `serverKey` is brand-new to this session or a
+   * renewal of one it already has wired up — the runner (session-controller.ts),
+   * not the operator, decides `setMcpServers` (add) vs. `reconnectMcpServer`
+   * (renew) from its own tracked set of known server keys. See CLAUDE.md's
+   * eSputnik OAuth section for why the operator can't reliably make that
+   * call itself.
+   */
+  | { action: 'sync_esputnik_mcp'; serverKey: string }
+  | { action: 'esputnik_status' };
 
 export type ControlResponse =
   | { ok: true; action: 'context'; context: ContextUsageSummary }
   | { ok: true; action: 'set_effort' }
   | { ok: true; action: 'set_context_limit' }
+  | { ok: true; action: 'sync_esputnik_mcp'; mode: 'added' | 'reconnected' }
+  | { ok: true; action: 'esputnik_status'; servers: EsputnikServerStatus[] }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
@@ -195,12 +213,34 @@ export interface CustomEnvVar {
   setAt: string; // ISO 8601
 }
 
+/**
+ * One eSputnik account a person has connected via /esputnik_connect.
+ * `serverKey` (`esputnik-<account>`) is the literal key used both in the
+ * runner's `Options.mcpServers` and as the `mcpOAuth` credential prefix on
+ * NFS — derived deterministically from `account` alone, never regenerated,
+ * so reconnecting the same account always targets the same entry rather
+ * than creating a duplicate (see CLAUDE.md's eSputnik OAuth renewal note).
+ */
+export interface EsputnikConnection {
+  account: string;
+  serverKey: string;
+  connectedAt: string; // ISO 8601 — bumped on reconnect, not just first connect
+}
+
+/** `esputnik-<account>` — shared by operator (esputnik-oauth.ts, nfs.ts) and runner (sdk-session.ts) so both sides always agree on the same key for a given account label. */
+export function esputnikServerKey(account: string): string {
+  return `esputnik-${account}`;
+}
+
+export const ESPUTNIK_SERVER_URL = 'https://mcp.esputnik.com';
+
 export interface PersonState {
   version: 1;
   profile: PersonProfile;
   tasks: TaskRecord[];
   runtime: PersonRuntime;
   customEnv: Record<string, CustomEnvVar>; // keyed by var name
+  esputnikConnections: EsputnikConnection[];
 }
 
 export function emptyPersonState(displayName: string): PersonState {
@@ -210,6 +250,7 @@ export function emptyPersonState(displayName: string): PersonState {
     tasks: [],
     runtime: { lastDeliveredUpdateId: null },
     customEnv: {},
+    esputnikConnections: [],
   };
 }
 

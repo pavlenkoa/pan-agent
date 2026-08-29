@@ -10,10 +10,10 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { CanUseTool, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, McpServerConfig, McpServerToolPolicy, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import type { ChatMessage, ContextUsageSummary, EffortLevel, TurnRequest } from '../shared/types.js';
+import { ESPUTNIK_SERVER_URL, type ChatMessage, type ContextUsageSummary, type EffortLevel, type TurnRequest } from '../shared/types.js';
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
@@ -266,6 +266,84 @@ const TELEGRAM_EXTRAS_TOOLS = [
 ];
 
 /**
+ * The full eSputnik MCP tool name list (bare, as the server itself exposes
+ * them — not the `mcp__<server>__<tool>` prefixed form `allowedTools` uses
+ * for the in-process servers above). Captured from a real, live-connected
+ * `esputnik` MCP server session, 2026-08-29. The installed SDK's
+ * `McpServerToolPolicy` has no wildcard (`{name, permission_policy}` only,
+ * `name` required per tool — confirmed directly against sdk.d.ts, not
+ * inferred), so every tool needs its own explicit entry here to avoid an
+ * interactive permission prompt this headless bot can never answer. If
+ * eSputnik adds/removes tools, this list needs a manual refresh.
+ */
+const ESPUTNIK_TOOL_NAMES = [
+  'attach_group_contacts', 'bulk_upsert_contacts', 'create_app_inbox_message', 'create_email_message',
+  'create_event', 'create_mobile_push_message', 'create_past_events', 'create_sms_message',
+  'delete_app_inbox_message', 'delete_app_inbox_message_translation', 'delete_broadcast', 'delete_contact',
+  'delete_contact_by_external_customer_id', 'delete_email_message', 'delete_email_message_translation',
+  'delete_mobile_push_message', 'delete_mobile_push_message_translation', 'delete_sms_message',
+  'delete_sms_message_translation', 'detach_group_contacts', 'get_account_info', 'get_addressbooks',
+  'get_app_inbox_message', 'get_brandkit', 'get_broadcast', 'get_contact', 'get_contact_devices',
+  'get_contact_id_by_token', 'get_contact_in_app_message_statuses', 'get_contact_message_history',
+  'get_contacts_activity_v2', 'get_contacts_by_email', 'get_email_deliverability_setup',
+  'get_email_message_export', 'get_email_message_preview_png', 'get_email_message_view_link',
+  'get_event_types', 'get_events_analytics', 'get_group_contacts', 'get_import_status',
+  'get_message_status', 'get_messaging_analytics', 'get_mobile_push_message',
+  'get_mobile_push_token_activation', 'get_organisation_info', 'get_segment', 'get_segment_definition',
+  'get_segment_schema', 'get_sms_callouts', 'get_sms_message', 'get_workflow_export',
+  'list_app_inbox_messages', 'list_broadcasts', 'list_contacts', 'list_email_interfaces',
+  'list_email_messages', 'list_groups', 'list_mobile_push_messages', 'list_segment_definition_facets',
+  'list_segment_definitions', 'list_sms_interfaces', 'list_sms_messages', 'list_workflows',
+  'prepare_email_message_upload', 'prepare_image_upload', 'send_broadcast', 'send_email_message',
+  'send_sms_message', 'smart_send_message', 'subscribe_contact', 'update_app_inbox_message',
+  'update_app_inbox_message_translation', 'update_brandkit', 'update_brandkit_patch', 'update_contact',
+  'update_email_message', 'update_email_message_translation', 'update_interaction_status',
+  'update_mobile_push_message', 'update_mobile_push_message_translation', 'update_sms_message',
+  'update_sms_message_translation', 'upload_contacts', 'upload_image', 'upsert_contact',
+];
+
+export function esputnikToolPolicy(): McpServerToolPolicy[] {
+  return ESPUTNIK_TOOL_NAMES.map((name) => ({ name, permission_policy: 'always_allow' }));
+}
+
+/** `esputnik-work` from either `esputnik-work` (this project's own write shape, nfs.ts's writeEsputnikCredential) or a possible SDK-rewritten `esputnik-work|<hash>` — robust to either since it's unconfirmed locally which one the SDK settles on (see CLAUDE.md's "Phase 0 status" note). */
+function serverKeyFromCredentialKey(key: string): string {
+  const pipeIdx = key.indexOf('|');
+  return pipeIdx === -1 ? key : key.slice(0, pipeIdx);
+}
+
+/**
+ * Scans the person's own `.credentials.json` for already-connected eSputnik
+ * accounts (written by the operator's OAuth callback, esputnik-oauth.ts) and
+ * returns one static `Options.mcpServers` entry per account — this file is
+ * the single source of truth for "which accounts does this pod already know
+ * about," no separate manifest to keep in sync. Covers cold start and
+ * crash-restart. A newly-connected account while a session is already
+ * running instead goes through session-controller.ts's live `syncMcpServer`
+ * (via the runner's /control endpoint), not this function.
+ */
+export async function readEsputnikMcpServers(cfg: RunnerConfig): Promise<Record<string, McpServerConfig>> {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(await readFile(path.join(cfg.claudeHome, '.credentials.json'), 'utf8')) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw err;
+  }
+  const mcpOAuth = (raw['mcpOAuth'] as Record<string, unknown> | undefined) ?? {};
+  const serverKeys = new Set<string>();
+  for (const key of Object.keys(mcpOAuth)) {
+    const serverKey = serverKeyFromCredentialKey(key);
+    if (serverKey.startsWith('esputnik-')) serverKeys.add(serverKey);
+  }
+  const servers: Record<string, McpServerConfig> = {};
+  for (const serverKey of serverKeys) {
+    servers[serverKey] = { type: 'http', url: ESPUTNIK_SERVER_URL, tools: esputnikToolPolicy() };
+  }
+  return servers;
+}
+
+/**
  * `allowedTools` only auto-approves listed tools without a permission
  * prompt — it does NOT restrict which built-in tools exist. Without `tools`
  * set, the SDK's full native Claude Code toolset (CronCreate, ScheduleWakeup,
@@ -351,7 +429,12 @@ function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
   };
 }
 
-export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null, reactable: ReactableMessageRef): Options {
+export function buildQueryOptions(
+  cfg: RunnerConfig,
+  sessionId: string | null,
+  reactable: ReactableMessageRef,
+  esputnikServers: Record<string, McpServerConfig> = {},
+): Options {
   return {
     cwd: cfg.workspaceCwd,
     ...(sessionId ? { resume: sessionId } : {}),
@@ -401,6 +484,7 @@ export function buildQueryOptions(cfg: RunnerConfig, sessionId: string | null, r
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),
       'pan-agent-telegram-extras': buildTelegramExtrasMcpServer(cfg, reactable),
+      ...esputnikServers,
     },
     allowedTools: [
       'Bash',

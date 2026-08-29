@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -72,6 +72,23 @@ function fakeQueryFn(
 
 async function flushMicrotasks(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Like fakeQueryFn, but also exposes mockable setMcpServers/reconnectMcpServer for syncMcpServer's add-vs-reconnect tests. */
+function fakeQueryFnWithMcp(fakeEvents: ReturnType<typeof createPushableQueue<SDKMessage>>) {
+  const setMcpServers = vi.fn().mockResolvedValue({ added: [], removed: [] });
+  const reconnectMcpServer = vi.fn().mockResolvedValue(undefined);
+  const queryFn = vi.fn(() => {
+    const gen = (async function* gen() {
+      for await (const msg of fakeEvents) yield msg;
+    })();
+    return Object.assign(gen, {
+      getContextUsage: async () => ({ model: 'claude-sonnet-5', totalTokens: 0, maxTokens: 1_000_000, isAutoCompactEnabled: true }),
+      setMcpServers,
+      reconnectMcpServer,
+    }) as unknown as Query;
+  });
+  return { queryFn, setMcpServers, reconnectMcpServer };
 }
 
 /**
@@ -431,4 +448,99 @@ describe('createSessionController', () => {
     },
     20000,
   );
+
+  describe('syncMcpServer', () => {
+    it('adds a brand-new server via setMcpServers, not reconnectMcpServer', async () => {
+      const fakeEvents = createPushableQueue<SDKMessage>();
+      fakeEventsInUse = fakeEvents;
+      const { queryFn, setMcpServers, reconnectMcpServer } = fakeQueryFnWithMcp(fakeEvents);
+      controller = createSessionController(cfg, queryFn);
+      await controller.start();
+      await vi.waitFor(() => expect(queryFn).toHaveBeenCalled());
+
+      const config = { type: 'http' as const, url: 'https://mcp.esputnik.com' };
+      const mode = await controller.syncMcpServer('esputnik-work', config);
+
+      expect(mode).toBe('added');
+      expect(setMcpServers).toHaveBeenCalledWith({ 'esputnik-work': config });
+      expect(reconnectMcpServer).not.toHaveBeenCalled();
+    });
+
+    it('reconnects a server it already added dynamically this session, instead of re-adding it', async () => {
+      const fakeEvents = createPushableQueue<SDKMessage>();
+      fakeEventsInUse = fakeEvents;
+      const { queryFn, setMcpServers, reconnectMcpServer } = fakeQueryFnWithMcp(fakeEvents);
+      controller = createSessionController(cfg, queryFn);
+      await controller.start();
+      await vi.waitFor(() => expect(queryFn).toHaveBeenCalled());
+
+      const config = { type: 'http' as const, url: 'https://mcp.esputnik.com' };
+      await controller.syncMcpServer('esputnik-work', config);
+      setMcpServers.mockClear();
+
+      const mode = await controller.syncMcpServer('esputnik-work', config);
+
+      expect(mode).toBe('reconnected');
+      expect(reconnectMcpServer).toHaveBeenCalledWith('esputnik-work');
+      expect(setMcpServers).not.toHaveBeenCalled();
+    });
+
+    it('reconnects a server that was already static at boot (from the credentials file), never adds it', async () => {
+      // Renewal case: an account connected before this pod's current
+      // session started is already in Options.mcpServers via
+      // readEsputnikMcpServers — a reconnect must not try to re-add it.
+      await writeFile(
+        path.join(dir, '.credentials.json'),
+        JSON.stringify({ mcpOAuth: { 'esputnik-work': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+      );
+      const fakeEvents = createPushableQueue<SDKMessage>();
+      fakeEventsInUse = fakeEvents;
+      const { queryFn, setMcpServers, reconnectMcpServer } = fakeQueryFnWithMcp(fakeEvents);
+      controller = createSessionController(cfg, queryFn);
+      await controller.start();
+      await vi.waitFor(() => expect(queryFn).toHaveBeenCalled());
+
+      const mode = await controller.syncMcpServer('esputnik-work', { type: 'http', url: 'https://mcp.esputnik.com' });
+
+      expect(mode).toBe('reconnected');
+      expect(reconnectMcpServer).toHaveBeenCalledWith('esputnik-work');
+      expect(setMcpServers).not.toHaveBeenCalled();
+    });
+
+    it('throws if the session has not started yet', async () => {
+      controller = createSessionController(cfg, fakeQueryFnWithMcp(createPushableQueue<SDKMessage>()).queryFn);
+      await expect(controller.syncMcpServer('esputnik-work', { type: 'http', url: 'https://mcp.esputnik.com' })).rejects.toThrow(
+        /not started yet/,
+      );
+    });
+  });
+
+  describe('getEsputnikStatus', () => {
+    it('filters mcpServerStatus() down to eSputnik servers only, mapped to serverKey/status', async () => {
+      const fakeEvents = createPushableQueue<SDKMessage>();
+      fakeEventsInUse = fakeEvents;
+      const mcpServerStatus = vi.fn().mockResolvedValue([
+        { name: 'esputnik-work', status: 'connected' },
+        { name: 'esputnik-personal', status: 'needs-auth' },
+        { name: 'pan-agent-scheduling', status: 'connected' },
+      ]);
+      const queryFn = vi.fn(() => {
+        const gen = (async function* gen() {
+          for await (const msg of fakeEvents) yield msg;
+        })();
+        return Object.assign(gen, {
+          getContextUsage: async () => ({ model: 'claude-sonnet-5', totalTokens: 0, maxTokens: 1_000_000, isAutoCompactEnabled: true }),
+          mcpServerStatus,
+        }) as unknown as Query;
+      });
+      controller = createSessionController(cfg, queryFn);
+      await controller.start();
+      await vi.waitFor(() => expect(queryFn).toHaveBeenCalled());
+
+      expect(await controller.getEsputnikStatus()).toEqual([
+        { serverKey: 'esputnik-work', status: 'connected' },
+        { serverKey: 'esputnik-personal', status: 'needs-auth' },
+      ]);
+    });
+  });
 });

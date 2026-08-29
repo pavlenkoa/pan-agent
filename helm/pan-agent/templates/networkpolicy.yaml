@@ -102,6 +102,29 @@ spec:
             - port: {{ .Values.operator.tasksApiPort | quote }}
               protocol: TCP
 
+    # The eSputnik OAuth callback (esputnik-oauth.ts/oauth-server.ts) — the
+    # operator's first-ever public-facing route, reached via the homelab's
+    # kgateway HTTPRoute (deliberately NOT paired with the Authelia
+    # extAuth TrafficPolicy every other homelab route uses, since a
+    # person's own phone browser must reach it unauthenticated mid-OAuth-
+    # flow — see CLAUDE.md's eSputnik OAuth design note). `fromEntities:
+    # [host]`, not a pod-label `fromEndpoints`, because kgateway's envoy
+    # proxy runs with `hostNetwork: true` (homelab's
+    # kubernetes/apps/kgateway/templates/envoy-proxy.yaml) pinned to this
+    # same node (`nodeName`/`envoyProxy.nodeSelector` both `macmini`) — its
+    # traffic arrives as the node's own IP, not a distinct pod identity
+    # Cilium can match by label. Unverified against the real cluster as of
+    # this writing (no other homelab service has needed a NetworkPolicy at
+    # all, let alone one admitting hostNetwork traffic) — confirm this
+    # actually matches before relying on it, don't assume it from this
+    # comment alone.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: {{ .Values.operator.oauthCallbackPort | quote }}
+              protocol: TCP
+
   egress:
     # 1. DNS
     - toEndpoints:

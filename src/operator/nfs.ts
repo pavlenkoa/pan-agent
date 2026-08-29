@@ -7,6 +7,8 @@
 import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { ESPUTNIK_SERVER_URL } from '../shared/types.js';
+
 const NFS_MOUNT_PATH = process.env['NFS_MOUNT_PATH'] ?? '/mnt/pan-agent-nfs';
 
 // Must match MEMORY_DIR_NAME in runner/sdk-session.ts (the runner's
@@ -214,4 +216,65 @@ export async function removeStickerPack(slug: string, name: string): Promise<boo
   if (remaining.length === packs.length) return false;
   await writeFile(stickerPacksFile(slug), JSON.stringify(remaining, null, 2));
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// eSputnik MCP OAuth credentials (/esputnik_connect) — written directly into
+// the person's own `.claude/.credentials.json`, the exact file/shape the
+// Claude Code CLI's own MCP OAuth client already reads and auto-refreshes
+// from (confirmed live against this machine's real esputnik connection
+// before this design was built) — a plain file write to an already-mounted
+// NFS volume, no pod restart involved.
+// ---------------------------------------------------------------------------
+
+function credentialsFile(slug: string): string {
+  return path.join(NFS_MOUNT_PATH, 'people', slug, 'claude', '.credentials.json');
+}
+
+/** Everything a stored `mcpOAuth` entry needs besides `serverName`/`serverUrl` (which writeEsputnikCredential fills in itself). */
+export interface EsputnikTokenSet {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number; // epoch ms
+  clientId: string;
+  redirectUri: string;
+  issuer: string;
+  scope: string;
+  discoveryState: {
+    authorizationServerUrl: string;
+    resourceMetadataUrl: string;
+    oauthMetadataFound: boolean;
+  };
+}
+
+/**
+ * Read-modify-write `.credentials.json`'s `mcpOAuth` map, writing under the
+ * plain key `serverKey` (not a `serverKey|<hash>` suffix) and pruning any
+ * existing `serverKey`-or-`serverKey|*` entry first — a reconnect (renewing
+ * a dead token, see CLAUDE.md's eSputnik OAuth renewal note) always
+ * overwrites in place rather than risking a stale duplicate, regardless of
+ * whatever key format the SDK's own writes might use once it touches this
+ * file itself (unconfirmed locally, verified live in Phase 5 against a real
+ * pod instead — see CLAUDE.md's "Phase 0 status" note). Preserves every
+ * other top-level key (`claudeAiOauth`, other services' `mcpOAuth` entries)
+ * untouched. Read-then-write with no lock — the window is small and this
+ * project accepts that class of low-probability race at its current scale
+ * (same reasoning as the design's OAuth security notes).
+ */
+export async function writeEsputnikCredential(slug: string, serverKey: string, tokens: EsputnikTokenSet): Promise<void> {
+  const filePath = credentialsFile(slug);
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(await readFile(filePath, 'utf8')) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const mcpOAuth = { ...((raw['mcpOAuth'] as Record<string, unknown> | undefined) ?? {}) };
+  for (const key of Object.keys(mcpOAuth)) {
+    if (key === serverKey || key.startsWith(`${serverKey}|`)) delete mcpOAuth[key];
+  }
+  mcpOAuth[serverKey] = { serverName: serverKey, serverUrl: ESPUTNIK_SERVER_URL, ...tokens };
+  const next = { ...raw, mcpOAuth };
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(next, null, 2), { mode: 0o600 });
 }

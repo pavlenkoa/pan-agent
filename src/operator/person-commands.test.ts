@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseSetVarArgs } from './person-commands.js';
+import { parseEsputnikAccount, parseSetVarArgs } from './person-commands.js';
 
 describe('parseSetVarArgs', () => {
   it('parses a bare KEY=VALUE with no description', () => {
@@ -45,5 +45,31 @@ describe('parseSetVarArgs', () => {
 
   it('rejects an empty value', () => {
     expect(parseSetVarArgs(['FOO='])).toEqual({ error: expect.stringContaining('empty') });
+  });
+});
+
+describe('parseEsputnikAccount', () => {
+  it('accepts a lowercase account label', () => {
+    expect(parseEsputnikAccount(['work'])).toEqual({ account: 'work' });
+  });
+
+  it('accepts digits and underscores after the first letter', () => {
+    expect(parseEsputnikAccount(['work_2'])).toEqual({ account: 'work_2' });
+  });
+
+  it('rejects missing args', () => {
+    expect(parseEsputnikAccount([])).toEqual({ error: expect.stringContaining('Usage') });
+  });
+
+  it('rejects an uppercase label', () => {
+    expect(parseEsputnikAccount(['Work'])).toEqual({ error: expect.stringContaining('Invalid account label') });
+  });
+
+  it('rejects a label starting with a digit', () => {
+    expect(parseEsputnikAccount(['1work'])).toEqual({ error: expect.stringContaining('Invalid account label') });
+  });
+
+  it('rejects a label with a dash', () => {
+    expect(parseEsputnikAccount(['my-work'])).toEqual({ error: expect.stringContaining('Invalid account label') });
   });
 });

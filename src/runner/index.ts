@@ -21,11 +21,11 @@ import { promisify } from 'node:util';
 
 import { readJsonBody, sendJson } from '../shared/http.js';
 import { log, truncateText } from '../shared/log.js';
-import type { ControlRequest, ControlResponse, TurnRequest } from '../shared/types.js';
+import { ESPUTNIK_SERVER_URL, type ControlRequest, type ControlResponse, type TurnRequest } from '../shared/types.js';
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { createSessionController } from './session-controller.js';
-import { personaChangedSinceLastAck, readSavedSessionId, resolveReplyText } from './sdk-session.js';
+import { esputnikToolPolicy, personaChangedSinceLastAck, readSavedSessionId, resolveReplyText } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
@@ -230,9 +230,18 @@ async function main(): Promise<void> {
       } else if (body.action === 'set_effort') {
         await controller.setEffortLevel(body.level);
         response = { ok: true, action: 'set_effort' };
-      } else {
+      } else if (body.action === 'set_context_limit') {
         controller.setContextLimit(body.tokens);
         response = { ok: true, action: 'set_context_limit' };
+      } else if (body.action === 'sync_esputnik_mcp') {
+        const mode = await controller.syncMcpServer(body.serverKey, {
+          type: 'http',
+          url: ESPUTNIK_SERVER_URL,
+          tools: esputnikToolPolicy(),
+        });
+        response = { ok: true, action: 'sync_esputnik_mcp', mode };
+      } else {
+        response = { ok: true, action: 'esputnik_status', servers: await controller.getEsputnikStatus() };
       }
       sendJson(res, 200, response);
     } catch (err) {

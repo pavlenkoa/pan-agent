@@ -15,6 +15,17 @@ nodeName: ""
 
 operator:
   tasksApiPort: 8081
+  # A second, isolated HTTP server (esputnik-oauth's public callback route,
+  # see CLAUDE.md's eSputnik OAuth design note) — deliberately not the same
+  # server/port as tasksApiPort, so a bug in one can't reach the other.
+  oauthCallbackPort: 8082
+  # Public hostname the callback is actually reachable at — must exactly
+  # match whatever the deploying cluster's HTTPRoute serves this port under
+  # (byte-identical redirect_uri on every eSputnik OAuth call). Environment-
+  # specific in principle, but every current deployment uses the same
+  # homelab, so it's a plain default here rather than requiring every
+  # environment's values file to set it.
+  publicCallbackHost: api.pavlenko.io
   resources:
     requests:
       cpu: 50m

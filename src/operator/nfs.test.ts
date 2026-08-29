@@ -15,6 +15,22 @@ let deletePersonSkill: typeof import('./nfs.js').deletePersonSkill;
 let listStickerPacks: typeof import('./nfs.js').listStickerPacks;
 let addStickerPack: typeof import('./nfs.js').addStickerPack;
 let removeStickerPack: typeof import('./nfs.js').removeStickerPack;
+let writeEsputnikCredential: typeof import('./nfs.js').writeEsputnikCredential;
+
+const SAMPLE_TOKENS = {
+  accessToken: 'access-1',
+  refreshToken: 'refresh-1',
+  expiresAt: 1_800_000_000_000,
+  clientId: 'client-1',
+  redirectUri: 'https://api.pavlenko.io/oauth/esputnik/callback',
+  issuer: 'https://mcp.esputnik.com/',
+  scope: 'esputnik.api',
+  discoveryState: {
+    authorizationServerUrl: 'https://mcp.esputnik.com/',
+    resourceMetadataUrl: 'https://mcp.esputnik.com/.well-known/oauth-protected-resource',
+    oauthMetadataFound: true,
+  },
+};
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-nfs-'));
@@ -27,6 +43,7 @@ beforeAll(async () => {
   listStickerPacks = mod.listStickerPacks;
   addStickerPack = mod.addStickerPack;
   removeStickerPack = mod.removeStickerPack;
+  writeEsputnikCredential = mod.writeEsputnikCredential;
 });
 
 afterAll(async () => {
@@ -218,5 +235,65 @@ describe('listStickerPacks / addStickerPack / removeStickerPack', () => {
 
   it('returns false removing a pack that was never added', async () => {
     expect(await removeStickerPack('roman', 'NeverAdded')).toBe(false);
+  });
+});
+
+describe('writeEsputnikCredential', () => {
+  it('creates .credentials.json (and the person dir) when neither exists yet', async () => {
+    await writeEsputnikCredential('fresh-person', 'esputnik-work', SAMPLE_TOKENS);
+
+    const raw = JSON.parse(await readFile(path.join(dir, 'people', 'fresh-person', 'claude', '.credentials.json'), 'utf8'));
+    expect(raw.mcpOAuth['esputnik-work']).toEqual({
+      serverName: 'esputnik-work',
+      serverUrl: 'https://mcp.esputnik.com',
+      ...SAMPLE_TOKENS,
+    });
+  });
+
+  it('preserves unrelated existing top-level keys and other mcpOAuth entries', async () => {
+    const claudeDir = path.join(dir, 'people', 'multi-account', 'claude');
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: 'main-token' },
+        mcpOAuth: { 'esputnik-personal': { serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' } },
+      }),
+    );
+
+    await writeEsputnikCredential('multi-account', 'esputnik-work', SAMPLE_TOKENS);
+
+    const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
+    expect(raw.claudeAiOauth).toEqual({ accessToken: 'main-token' });
+    expect(raw.mcpOAuth['esputnik-personal']).toEqual({ serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' });
+    expect(raw.mcpOAuth['esputnik-work']).toEqual({
+      serverName: 'esputnik-work',
+      serverUrl: 'https://mcp.esputnik.com',
+      ...SAMPLE_TOKENS,
+    });
+  });
+
+  it('overwrites in place on reconnect — same key, no duplicate, new tokens win', async () => {
+    await writeEsputnikCredential('reconnector', 'esputnik-work', SAMPLE_TOKENS);
+    const renewedTokens = { ...SAMPLE_TOKENS, accessToken: 'access-2', refreshToken: 'refresh-2' };
+    await writeEsputnikCredential('reconnector', 'esputnik-work', renewedTokens);
+
+    const raw = JSON.parse(await readFile(path.join(dir, 'people', 'reconnector', 'claude', '.credentials.json'), 'utf8'));
+    expect(Object.keys(raw.mcpOAuth)).toEqual(['esputnik-work']);
+    expect(raw.mcpOAuth['esputnik-work'].accessToken).toBe('access-2');
+  });
+
+  it('prunes a stale `serverKey|<hash>`-style entry for the same account before writing', async () => {
+    const claudeDir = path.join(dir, 'people', 'legacy-key', 'claude');
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({ mcpOAuth: { 'esputnik-work|deadbeef': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+    );
+
+    await writeEsputnikCredential('legacy-key', 'esputnik-work', SAMPLE_TOKENS);
+
+    const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
+    expect(Object.keys(raw.mcpOAuth)).toEqual(['esputnik-work']);
   });
 });

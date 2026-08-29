@@ -39,6 +39,8 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'context_limit', description: 'Show or set your auto-compact token limit (default 250,000)' },
   { command: 'compact', description: 'Manually compact your conversation history now' },
   { command: 'clear', description: 'Start a fresh conversation (memory/tasks are unaffected)' },
+  { command: 'esputnik_connect', description: 'Connect (or reconnect) your own eSputnik account: <account>' },
+  { command: 'esputnik_accounts', description: 'List your connected eSputnik accounts and their status' },
 ];
 
 /** The admin is also a tenant (router.ts) — their chat gets both lists. */

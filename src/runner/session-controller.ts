@@ -12,13 +12,14 @@
  * arriving while a turn is in flight queues in `reactionQueue` and runs once
  * the current job resolves, through the exact same path.
  */
-import { query as sdkQuery, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, type McpServerConfig, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
 import {
   DEFAULT_CONTEXT_LIMIT,
   type ContextUsageSummary,
   type EffortLevel,
+  type EsputnikServerStatus,
   type TaskTurn,
   type TurnRequest,
 } from '../shared/types.js';
@@ -29,6 +30,7 @@ import {
   buildUserMessage,
   logSdkMessage,
   noUpdateInstruction,
+  readEsputnikMcpServers,
   readSavedSessionId,
   resolveReplyText,
   saveSessionId,
@@ -86,6 +88,18 @@ export interface SessionController {
    * delivers whatever the model replies to Telegram — purely internal.
    */
   nudgePersonaRefresh(): Promise<void>;
+  /**
+   * One action whether `serverKey` is brand new to this session or a
+   * renewal of one it already has wired up (from `Options.mcpServers` at
+   * boot, or a previous call to this same method) — this is the decision
+   * the operator can't reliably make itself (see shared/types.ts's
+   * `ControlRequest`'s `sync_esputnik_mcp` doc comment), made here from
+   * `knownEsputnikKeys`, the only place that actually knows the live
+   * session's current server set. Throws if the session hasn't started yet.
+   */
+  syncMcpServer(serverKey: string, config: McpServerConfig): Promise<'added' | 'reconnected'>;
+  /** Live per-account connection health, filtered to eSputnik servers only. Throws if the session hasn't started yet. */
+  getEsputnikStatus(): Promise<EsputnikServerStatus[]>;
 }
 
 type QueryFn = typeof sdkQuery;
@@ -138,6 +152,16 @@ export function createSessionController(
   // getter for either (confirmed: no getSettings()-equivalent on Query).
   let effortLevel: EffortLevel = 'medium';
   let contextLimit = DEFAULT_CONTEXT_LIMIT;
+  // Reset at the top of every runSupervised loop iteration (cold start and
+  // every crash-restart both re-read the credentials file fresh, so a prior
+  // session's dynamic-add history is meaningless to the new one — see
+  // readEsputnikMcpServers' doc comment). `knownEsputnikKeys` covers both
+  // the static, boot-time entries AND anything added dynamically this
+  // session; `dynamicEsputnikServers` is only the latter, since
+  // `setMcpServers` replaces its whole dynamic tier on every call (confirmed
+  // from the SDK's own doc comment on that method — not additive per-call).
+  let knownEsputnikKeys = new Set<string>();
+  const dynamicEsputnikServers = new Map<string, McpServerConfig>();
   // The Telegram message a react_to_message tool call targets — only ever a
   // real inbound chat message's id (see submitTurn below); explicitly
   // cleared for synthetic pushes (task-notification replies, auto-compact)
@@ -434,7 +458,10 @@ ${noUpdateInstruction(
     while (!stopped) {
       try {
         sessionId = sessionId ?? (await readSavedSessionId(cfg));
-        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable) });
+        const esputnikServers = await readEsputnikMcpServers(cfg);
+        knownEsputnikKeys = new Set(Object.keys(esputnikServers));
+        dynamicEsputnikServers.clear();
+        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, esputnikServers) });
         queryHandle = handle;
         await consumeQuery(handle);
         if (stopped) return;
@@ -490,5 +517,25 @@ ${noUpdateInstruction(
       contextLimit = tokens;
     },
     nudgePersonaRefresh,
+    async syncMcpServer(serverKey: string, config: McpServerConfig): Promise<'added' | 'reconnected'> {
+      if (!queryHandle) throw new Error('session not started yet');
+      if (knownEsputnikKeys.has(serverKey)) {
+        // Already wired up (static from boot, or added dynamically earlier
+        // this session) — the config itself hasn't changed, only the
+        // on-disk credential has, so `setMcpServers` would likely be a
+        // no-op. Force a fresh handshake so it re-reads the rewritten file.
+        await queryHandle.reconnectMcpServer(serverKey);
+        return 'reconnected';
+      }
+      dynamicEsputnikServers.set(serverKey, config);
+      await queryHandle.setMcpServers(Object.fromEntries(dynamicEsputnikServers));
+      knownEsputnikKeys.add(serverKey);
+      return 'added';
+    },
+    async getEsputnikStatus(): Promise<EsputnikServerStatus[]> {
+      if (!queryHandle) throw new Error('session not started yet');
+      const statuses = await queryHandle.mcpServerStatus();
+      return statuses.filter((s) => s.name.startsWith('esputnik-')).map((s) => ({ serverKey: s.name, status: s.status }));
+    },
   };
 }

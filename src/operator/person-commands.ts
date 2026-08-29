@@ -14,17 +14,19 @@
 import { log } from '../shared/log.js';
 import {
   DEFAULT_CONTEXT_LIMIT,
+  esputnikServerKey,
   type ChatMessage,
-  type ControlRequest,
   type ControlResponse,
   type EffortLevel,
   type PersonIndexEntry,
 } from '../shared/types.js';
 import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
+import { beginEsputnikConnect } from './esputnik-oauth.js';
 import { deleteMemoryFile, deletePersonSkill, listMemoryFiles, listPersonSkills, listStickerPacks, removeStickerPack } from './nfs.js';
+import { postControl } from './pod-control.js';
 import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
-import { podIp, recreatePod } from './pod-lifecycle.js';
-import { RESERVED_ENV_NAMES, RUNNER_PORT } from './pod-template.js';
+import { recreatePod } from './pod-lifecycle.js';
+import { RESERVED_ENV_NAMES } from './pod-template.js';
 import type { RouterDeps } from './router-deps.js';
 
 const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -115,6 +117,12 @@ export async function tryHandlePersonCommand(
       return true;
     case '/context_limit':
       await handleContextLimit(deps, slug, person, args);
+      return true;
+    case '/esputnik_connect':
+      await handleEsputnikConnect(deps, slug, person, args);
+      return true;
+    case '/esputnik_accounts':
+      await handleEsputnikAccounts(deps, slug, person);
       return true;
     default:
       return false;
@@ -382,31 +390,13 @@ async function handleControlTurn(
   }
 }
 
-/** POSTs to the person's own pod's `/control` endpoint — a live call against their already-running session, not a turn (see shared/types.ts). Returns null on any failure to reach the pod. */
-async function postControl(deps: RouterDeps, slug: string, body: ControlRequest): Promise<ControlResponse | null> {
-  const ip = await podIp(deps.api, deps.cfg.namespace, slug);
-  if (!ip) return null;
-  try {
-    const res = await fetch(`http://${ip}:${RUNNER_PORT}/control`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    return (await res.json()) as ControlResponse;
-  } catch (err) {
-    log.error('control_request_failed', err, { person: slug });
-    return null;
-  }
-}
-
 /** Fetches the live context-usage snapshot, or sends a "couldn't reach it" reply and returns null. Shared by /context, /effort (no args), /context_limit (no args). */
 async function fetchContext(
   deps: RouterDeps,
   slug: string,
   person: PersonIndexEntry,
 ): Promise<Extract<ControlResponse, { action: 'context' }> | null> {
-  const result = await postControl(deps, slug, { action: 'context' });
+  const result = await postControl(deps.api, deps.cfg, slug, { action: 'context' });
   if (!result) {
     await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
     return null;
@@ -452,7 +442,7 @@ async function handleEffort(deps: RouterDeps, slug: string, person: PersonIndexE
     await deps.telegram.sendMessage(person.chatId, 'Usage: /effort low|medium|high|xhigh');
     return;
   }
-  const result = await postControl(deps, slug, { action: 'set_effort', level: level as EffortLevel });
+  const result = await postControl(deps.api, deps.cfg, slug, { action: 'set_effort', level: level as EffortLevel });
   if (!result) {
     await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
     return;
@@ -489,7 +479,7 @@ async function handleContextLimit(deps: RouterDeps, slug: string, person: Person
     );
     return;
   }
-  const result = await postControl(deps, slug, { action: 'set_context_limit', tokens });
+  const result = await postControl(deps.api, deps.cfg, slug, { action: 'set_context_limit', tokens });
   if (!result) {
     await deps.telegram.sendMessage(person.chatId, "Couldn't reach your session right now — try again in a moment.");
     return;
@@ -502,4 +492,91 @@ async function handleContextLimit(deps: RouterDeps, slug: string, person: Person
     person.chatId,
     `Context limit set to ${tokens.toLocaleString()} tokens for this session (resets to ${DEFAULT_CONTEXT_LIMIT.toLocaleString()} if your pod restarts).`,
   );
+}
+
+const ESPUTNIK_ACCOUNT_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+/**
+ * Pure parser for `/esputnik_connect <account>` — same split-out-for-
+ * testability shape as parseSetVarArgs. `account` becomes part of
+ * `esputnikServerKey` (`esputnik-<account>`), which is both the runner's
+ * `Options.mcpServers` key and the `mcpOAuth` credential prefix — kept
+ * lowercase/lowercase-and-digits so it's safe in both contexts without
+ * further sanitizing.
+ */
+export function parseEsputnikAccount(args: string[]): { account: string } | { error: string } {
+  const [account] = args;
+  if (!account) {
+    return { error: 'Usage: /esputnik_connect <account> — pick a short label, e.g. work or personal.' };
+  }
+  if (!ESPUTNIK_ACCOUNT_RE.test(account)) {
+    return {
+      error: `Invalid account label "${account}" — lowercase letters/digits/underscore only, must start with a letter.`,
+    };
+  }
+  return { account };
+}
+
+/**
+ * /esputnik_connect is idempotent, not insert-only: running it again for an
+ * already-connected account is how a dead/expired token gets renewed (see
+ * CLAUDE.md's eSputnik OAuth renewal note) — never rejected as "already
+ * connected." The reply wording is the only thing that differs between a
+ * first connect and a renewal; the OAuth flow itself (esputnik-oauth.ts) is
+ * identical either way.
+ */
+async function handleEsputnikConnect(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+  const parsed = parseEsputnikAccount(args);
+  if ('error' in parsed) {
+    await deps.telegram.sendMessage(person.chatId, parsed.error);
+    return;
+  }
+  const { account } = parsed;
+  const serverKey = esputnikServerKey(account);
+  const state = await readPersonState(deps.api, deps.cfg.namespace, slug);
+  const isReconnect = state?.esputnikConnections.some((c) => c.account === account) ?? false;
+
+  const result = await beginEsputnikConnect(deps.api, deps.cfg, slug, account, serverKey);
+  if ('error' in result) {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't start the eSputnik connection: ${result.error}`);
+    return;
+  }
+  await deps.telegram.sendMessage(
+    person.chatId,
+    `${isReconnect ? 'Reconnecting' : 'Connecting'} your eSputnik account "${account}" — open this link, log in with eSputnik, and approve:\n${result.url}\n\nThis link expires in 10 minutes.`,
+  );
+  log.line('esputnik_connect_started', { person: slug, account, isReconnect });
+}
+
+/**
+ * Read-only lister, same shape as /list_vars, but also live: shows each
+ * connected account's real `mcpServerStatus()` health (via /control) so a
+ * dead token is discoverable before a tool call silently fails mid-
+ * conversation — see CLAUDE.md's eSputnik OAuth renewal note. Tolerates an
+ * unreachable pod the same way fetchContext does, without failing the whole
+ * command — the PersonState listing itself is still useful on its own.
+ */
+async function handleEsputnikAccounts(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const state = await readPersonState(deps.api, deps.cfg.namespace, slug);
+  const connections = state?.esputnikConnections ?? [];
+  if (connections.length === 0) {
+    await deps.telegram.sendMessage(person.chatId, 'No eSputnik accounts connected. Use /esputnik_connect <account> to connect one.');
+    return;
+  }
+  const statusResult = await postControl(deps.api, deps.cfg, slug, { action: 'esputnik_status' });
+  const statusByKey = new Map<string, string>();
+  if (statusResult?.ok && statusResult.action === 'esputnik_status') {
+    for (const s of statusResult.servers) statusByKey.set(s.serverKey, s.status);
+  }
+  const lines = connections.map((c) => {
+    const status = statusByKey.get(c.serverKey);
+    const statusText =
+      status === 'connected'
+        ? 'ok'
+        : status
+          ? `needs reconnecting — run /esputnik_connect ${c.account}`
+          : 'status unknown right now';
+    return `${c.account} — connected since ${c.connectedAt} (${statusText})`;
+  });
+  await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
 }

@@ -9,6 +9,7 @@ import { clearCommandsFor, registerCommandsFor } from './bot-commands.js';
 import { loadOperatorConfig, type OperatorConfig } from './config.js';
 import { deliverTaskTurn } from './delivery.js';
 import { makeCoreV1Api } from './k8s.js';
+import { startOAuthCallbackServer } from './oauth-server.js';
 import { readPeopleIndex } from './people-index.js';
 import { bootReconcile } from './reconcile.js';
 import { routeUpdate, type RouterDeps } from './router.js';
@@ -49,6 +50,7 @@ async function main(): Promise<void> {
   await registerAllBotCommands(telegram, cfg, await readPeopleIndex(api, cfg.namespace));
 
   const tasksServer = startTasksApi(api, cfg.namespace, cfg.tasksApiPort);
+  const oauthServer = startOAuthCallbackServer(api, cfg);
 
   const deliver = async (slug: string, chatId: number, turn: TaskTurn): Promise<void> => {
     const idx = await readPeopleIndex(api, cfg.namespace);
@@ -65,6 +67,7 @@ async function main(): Promise<void> {
     log.line('operator_shutting_down');
     abortController.abort();
     tasksServer.close();
+    oauthServer.close();
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

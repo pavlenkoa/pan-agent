@@ -35,6 +35,10 @@ export interface OperatorConfig {
   defaultTz: string;
   operatorServiceHost: string;
   podReadyTimeoutMs: number;
+  /** Port the eSputnik OAuth callback HTTP server listens on — a separate, isolated server from the tasks API (see esputnik-oauth.ts/oauth-server.ts). */
+  oauthCallbackPort: number;
+  /** Public hostname the callback is actually reachable at (e.g. api.pavlenko.io) — used to build the exact `redirect_uri` registered with eSputnik, which must stay byte-identical on every call. */
+  publicCallbackHost: string;
 }
 
 export function loadOperatorConfig(): OperatorConfig {
@@ -57,5 +61,7 @@ export function loadOperatorConfig(): OperatorConfig {
     defaultTz: process.env['DEFAULT_TZ'] ?? 'Europe/Warsaw',
     operatorServiceHost: process.env['OPERATOR_SERVICE_HOST'] ?? `pan-agent-operator.${namespace}.svc`,
     podReadyTimeoutMs: Number(process.env['POD_READY_TIMEOUT_MS'] ?? 120_000),
+    oauthCallbackPort: Number(process.env['OAUTH_CALLBACK_PORT'] ?? 8082),
+    publicCallbackHost: process.env['PUBLIC_CALLBACK_HOST'] ?? 'api.pavlenko.io',
   };
 }

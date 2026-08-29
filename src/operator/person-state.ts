@@ -6,7 +6,13 @@ import { randomUUID } from 'node:crypto';
 
 import type { CoreV1Api } from '@kubernetes/client-node';
 
-import { emptyPersonState, type CustomEnvVar, type PersonState, type TaskRecord } from '../shared/types.js';
+import {
+  emptyPersonState,
+  type CustomEnvVar,
+  type EsputnikConnection,
+  type PersonState,
+  type TaskRecord,
+} from '../shared/types.js';
 import { createJsonConfigMap, readJsonConfigMap, updateJsonConfigMap } from './k8s.js';
 
 const DATA_KEY = 'state.json';
@@ -19,9 +25,9 @@ function personLabels(slug: string): Record<string, string> {
   return { 'app.kubernetes.io/name': 'pan-agent', 'pan-agent.pavlenko.io/person': slug };
 }
 
-/** Backfills fields added after a person's state ConfigMap was first created (e.g. customEnv). */
+/** Backfills fields added after a person's state ConfigMap was first created (e.g. customEnv, esputnikConnections). */
 function normalizePersonState(state: PersonState): PersonState {
-  return { ...state, customEnv: state.customEnv ?? {} };
+  return { ...state, customEnv: state.customEnv ?? {}, esputnikConnections: state.esputnikConnections ?? [] };
 }
 
 export async function ensurePersonState(
@@ -182,4 +188,26 @@ export async function removeCustomEnvVar(api: CoreV1Api, namespace: string, slug
     return state;
   });
   return removed;
+}
+
+// ---------------------------------------------------------------------------
+// eSputnik MCP connections (/esputnik_connect) — upsert, not insert-only:
+// reconnecting an already-connected account (renewing a dead token) must
+// overwrite its entry in place rather than error or duplicate. See
+// CLAUDE.md's eSputnik OAuth renewal note for why this has to be an upsert.
+// ---------------------------------------------------------------------------
+
+export async function upsertEsputnikConnection(
+  api: CoreV1Api,
+  namespace: string,
+  slug: string,
+  account: string,
+  serverKey: string,
+): Promise<EsputnikConnection> {
+  const entry: EsputnikConnection = { account, serverKey, connectedAt: new Date().toISOString() };
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    state.esputnikConnections = [...state.esputnikConnections.filter((c) => c.account !== account), entry];
+    return state;
+  });
+  return entry;
 }

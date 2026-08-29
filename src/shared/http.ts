@@ -20,3 +20,8 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
   res.end(payload);
 }
+
+export function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) });
+  res.end(html);
+}
