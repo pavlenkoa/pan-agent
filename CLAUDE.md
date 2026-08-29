@@ -298,6 +298,29 @@ stdout to your log backend picks it up like any other pod.
   `/skills`/`/forget_skill` treat them as unremovable shared state instead of
   misreporting them as person-authored. Adding a third shared skill means
   updating both places.
+- **The Claude Code CLI's `mcpOAuth` credential store only recognizes a
+  `<serverName>|<hash>`-keyed entry, never a bare `<serverName>` key.**
+  Confirmed live 2026-08-29 building self-service eSputnik MCP OAuth
+  (`/esputnik_connect`, `operator/esputnik-oauth.ts`): a hand-written
+  `.credentials.json` entry under the bare server name was silently
+  ignored — the CLI, finding no matching `|`-suffixed key, bootstrapped its
+  *own* fresh OAuth client instead (a real `POST /register` DCR call, plus
+  a stub entry with an empty `accessToken` under its own self-chosen key,
+  using its default `http://localhost:3118/callback` redirect). That
+  redirect can never complete in a headless pod, so the connection just sat
+  broken — two unrelated entries coexisting in the file, neither usable.
+  The `<hash>` suffix itself doesn't need deriving: it was observed
+  identical (`909f472c1d8ca133`) across two totally independent cases (this
+  project's own dev-machine session, serverName `esputnik`; the SDK's own
+  self-generated stub on a live person pod, serverName `esputnik-fatline`,
+  a different self-registered clientId) that shared only one thing —
+  `serverUrl: https://mcp.esputnik.com`. It's a pure function of the URL,
+  not of name or client, so `operator/nfs.ts`'s `writeEsputnikCredential`
+  just hardcodes that one observed value rather than reverse-engineering
+  the actual hash algorithm. If eSputnik's MCP URL ever changes, or another
+  OAuth-based MCP server gets added, the same value can't be assumed — it'd
+  need rediscovering the same way (write a token under the bare name first,
+  let the SDK generate its own broken stub, read back the key it chose).
 
 ## Non-goals (deferred, not forgotten)
 

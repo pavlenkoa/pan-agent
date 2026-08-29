@@ -410,6 +410,19 @@ export const MEMORY_DIR_NAME = 'memory';
  * don't already auto-approve (the SDK's own `CAN_USE_TOOL_SHADOWED` warning
  * describes this) — so this is additive: it cannot loosen anything for a
  * tool call that already succeeds today.
+ *
+ * Also covers eSputnik MCP tools (`mcp__esputnik-<account>__...`). Confirmed
+ * live 2026-08-29: a per-server `tools: [{name, permission_policy:
+ * 'always_allow'}]` entry on the `McpHttpServerConfig` (`esputnikToolPolicy`
+ * above) does NOT bypass `canUseTool` the way a bare `allowedTools` entry
+ * does — the CAN_USE_TOOL_SHADOWED warning's list is exhaustive, and every
+ * esputnik tool call fell through to this callback and was denied as
+ * "outside the auto-approved surface" on first live test. Static
+ * `allowedTools` isn't a fix either: an account connected live mid-session
+ * via `syncMcpServer`'s `setMcpServers` path (session-controller.ts) has a
+ * server key `allowedTools` couldn't have known about at `buildQueryOptions`
+ * time. Matching the `mcp__esputnik-` prefix here instead covers both the
+ * boot-time and live-added cases uniformly, with no extra plumbing.
  */
 function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
   const skillsDir = path.join(cfg.workspaceCwd, '.claude', 'skills');
@@ -417,6 +430,10 @@ function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
     !!p && (path.resolve(p) === skillsDir || path.resolve(p).startsWith(skillsDir + path.sep));
 
   return async (toolName, input, options) => {
+    if (toolName.startsWith('mcp__esputnik-')) {
+      return { behavior: 'allow', updatedInput: input };
+    }
+
     const filePath = typeof input['file_path'] === 'string' ? (input['file_path'] as string) : undefined;
     const command = typeof input['command'] === 'string' ? (input['command'] as string) : undefined;
     const targetsSkillsDir =
