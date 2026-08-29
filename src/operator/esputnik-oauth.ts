@@ -172,13 +172,30 @@ async function exchangeCode(client: OAuthClientConfig, code: string, codeVerifie
  * module). Best-effort: a missing person record (deleted/denied between
  * /esputnik_connect and completing the browser flow) just skips the note.
  */
-async function notifyEsputnikConnected(api: CoreV1Api, cfg: OperatorConfig, slug: string, account: string): Promise<void> {
+/**
+ * Spells out the tool prefix explicitly rather than just saying "connected"
+ * — confirmed live 2026-08-29 that a bare "connected" note isn't enough:
+ * asked to verify the connection, the model had no way to know these MCP
+ * tools existed at all and reached for the older Basic-Auth esputnik-query
+ * skill instead (the only eSputnik mechanism its CLAUDE.md described at the
+ * time). CLAUDE.md now documents this mechanism too, but an
+ * already-running session won't see that update mid-conversation (persona
+ * changes only get nudged into a resumed session around pod restart, not
+ * live) — this note is what actually reaches an already-connected session.
+ */
+async function notifyEsputnikConnected(
+  api: CoreV1Api,
+  cfg: OperatorConfig,
+  slug: string,
+  account: string,
+  serverKey: string,
+): Promise<void> {
   const idx = await readPeopleIndex(api, cfg.namespace);
   const person = idx.people[slug];
   if (!person) return;
   const message: ChatMessage = {
     messageId: 0,
-    text: `[System note: eSputnik account "${account}" connected. Stay silent unless it's worth mentioning.]`,
+    text: `[System note: eSputnik account "${account}" connected — you now have live tools named mcp__${serverKey}__... (e.g. mcp__${serverKey}__get_account_info), ready to use right now with no further setup. Stay silent unless it's worth mentioning.]`,
     fromHandle: null,
     date: new Date().toISOString(),
   };
@@ -260,7 +277,7 @@ export async function handleCallback(api: CoreV1Api, cfg: OperatorConfig, query:
     log.line('esputnik_sync_deferred', { person: entry.slug, account: entry.account });
   }
 
-  await notifyEsputnikConnected(api, cfg, entry.slug, entry.account);
+  await notifyEsputnikConnected(api, cfg, entry.slug, entry.account, entry.serverKey);
 
   log.line('esputnik_account_connected', { person: entry.slug, account: entry.account });
   return { ok: true, message: `Connected your eSputnik account "${entry.account}". You can close this tab.` };

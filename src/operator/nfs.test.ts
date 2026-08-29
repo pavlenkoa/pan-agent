@@ -238,12 +238,20 @@ describe('listStickerPacks / addStickerPack / removeStickerPack', () => {
   });
 });
 
+// Confirmed live 2026-08-29: the CLI only recognizes an `mcpOAuth` entry
+// keyed `<name>|<hash>` — a bare `<name>` key is silently ignored (see
+// writeEsputnikCredential's doc comment in nfs.ts for the full story). This
+// exact suffix was observed for `https://mcp.esputnik.com` from two
+// completely independent sources (different serverName, different
+// clientId, different machine) — a pure function of serverUrl alone.
+const ESPUTNIK_KEY = 'esputnik-work|909f472c1d8ca133';
+
 describe('writeEsputnikCredential', () => {
-  it('creates .credentials.json (and the person dir) when neither exists yet', async () => {
+  it('creates .credentials.json (and the person dir) when neither exists yet, keyed `<serverKey>|<hash>`', async () => {
     await writeEsputnikCredential('fresh-person', 'esputnik-work', SAMPLE_TOKENS);
 
     const raw = JSON.parse(await readFile(path.join(dir, 'people', 'fresh-person', 'claude', '.credentials.json'), 'utf8'));
-    expect(raw.mcpOAuth['esputnik-work']).toEqual({
+    expect(raw.mcpOAuth[ESPUTNIK_KEY]).toEqual({
       serverName: 'esputnik-work',
       serverUrl: 'https://mcp.esputnik.com',
       ...SAMPLE_TOKENS,
@@ -257,7 +265,7 @@ describe('writeEsputnikCredential', () => {
       path.join(claudeDir, '.credentials.json'),
       JSON.stringify({
         claudeAiOauth: { accessToken: 'main-token' },
-        mcpOAuth: { 'esputnik-personal': { serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' } },
+        mcpOAuth: { 'esputnik-personal|909f472c1d8ca133': { serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' } },
       }),
     );
 
@@ -265,8 +273,11 @@ describe('writeEsputnikCredential', () => {
 
     const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
     expect(raw.claudeAiOauth).toEqual({ accessToken: 'main-token' });
-    expect(raw.mcpOAuth['esputnik-personal']).toEqual({ serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' });
-    expect(raw.mcpOAuth['esputnik-work']).toEqual({
+    expect(raw.mcpOAuth['esputnik-personal|909f472c1d8ca133']).toEqual({
+      serverName: 'esputnik-personal',
+      serverUrl: 'https://mcp.esputnik.com',
+    });
+    expect(raw.mcpOAuth[ESPUTNIK_KEY]).toEqual({
       serverName: 'esputnik-work',
       serverUrl: 'https://mcp.esputnik.com',
       ...SAMPLE_TOKENS,
@@ -279,21 +290,26 @@ describe('writeEsputnikCredential', () => {
     await writeEsputnikCredential('reconnector', 'esputnik-work', renewedTokens);
 
     const raw = JSON.parse(await readFile(path.join(dir, 'people', 'reconnector', 'claude', '.credentials.json'), 'utf8'));
-    expect(Object.keys(raw.mcpOAuth)).toEqual(['esputnik-work']);
-    expect(raw.mcpOAuth['esputnik-work'].accessToken).toBe('access-2');
+    expect(Object.keys(raw.mcpOAuth)).toEqual([ESPUTNIK_KEY]);
+    expect(raw.mcpOAuth[ESPUTNIK_KEY].accessToken).toBe('access-2');
   });
 
-  it('prunes a stale `serverKey|<hash>`-style entry for the same account before writing', async () => {
+  it('prunes a stale/bare or wrong-hash entry for the same account before writing (e.g. an SDK-generated broken stub)', async () => {
     const claudeDir = path.join(dir, 'people', 'legacy-key', 'claude');
     await mkdir(claudeDir, { recursive: true });
     await writeFile(
       path.join(claudeDir, '.credentials.json'),
-      JSON.stringify({ mcpOAuth: { 'esputnik-work|deadbeef': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+      JSON.stringify({
+        mcpOAuth: {
+          'esputnik-work': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' },
+          'esputnik-work|deadbeef': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com', accessToken: '' },
+        },
+      }),
     );
 
     await writeEsputnikCredential('legacy-key', 'esputnik-work', SAMPLE_TOKENS);
 
     const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
-    expect(Object.keys(raw.mcpOAuth)).toEqual(['esputnik-work']);
+    expect(Object.keys(raw.mcpOAuth)).toEqual([ESPUTNIK_KEY]);
   });
 });

@@ -248,18 +248,44 @@ export interface EsputnikTokenSet {
 }
 
 /**
- * Read-modify-write `.credentials.json`'s `mcpOAuth` map, writing under the
- * plain key `serverKey` (not a `serverKey|<hash>` suffix) and pruning any
- * existing `serverKey`-or-`serverKey|*` entry first — a reconnect (renewing
- * a dead token, see CLAUDE.md's eSputnik OAuth renewal note) always
- * overwrites in place rather than risking a stale duplicate, regardless of
- * whatever key format the SDK's own writes might use once it touches this
- * file itself (unconfirmed locally, verified live in Phase 5 against a real
- * pod instead — see CLAUDE.md's "Phase 0 status" note). Preserves every
- * other top-level key (`claudeAiOauth`, other services' `mcpOAuth` entries)
- * untouched. Read-then-write with no lock — the window is small and this
- * project accepts that class of low-probability race at its current scale
- * (same reasoning as the design's OAuth security notes).
+ * Confirmed live 2026-08-29: the CLI does NOT recognize a bare-`serverName`-
+ * keyed `mcpOAuth` entry at all — it looks specifically for
+ * `<name>|<hash>`, and finding nothing there, silently bootstraps its OWN
+ * fresh OAuth client (a real DCR `POST /register` call, plus a stub entry
+ * with an empty `accessToken` under its own `<name>|<hash>` key) using its
+ * default `http://localhost:3118/callback` redirect — which can never
+ * complete in a headless pod, so the MCP connection just sits broken. This
+ * was caught by writing a first real entry under the bare key: the SDK
+ * ignored it and created a second, separate, useless stub entry instead of
+ * ever touching it. The `<hash>` suffix itself was recovered empirically,
+ * not derived: `esputnik|909f472c1d8ca133` (this project's own dev-machine
+ * session, serverName `esputnik`) and `esputnik-fatline|909f472c1d8ca133`
+ * (the SDK's own self-generated stub for a live person pod, serverName
+ * `esputnik-fatline`, a completely different self-registered clientId) both
+ * produced the identical suffix for the identical `serverUrl` — different
+ * name, different clientId, different machine, same hash, so it's a pure
+ * function of `serverUrl` alone, not of anything account-specific. Since
+ * `ESPUTNIK_SERVER_URL` never varies in this codebase, that one observed
+ * value can just be reused for every account rather than re-derived.
+ */
+const ESPUTNIK_SERVER_URL_HASH_SUFFIX = '909f472c1d8ca133';
+
+function esputnikCredentialKey(serverKey: string): string {
+  return `${serverKey}|${ESPUTNIK_SERVER_URL_HASH_SUFFIX}`;
+}
+
+/**
+ * Read-modify-write `.credentials.json`'s `mcpOAuth` map under the exact key
+ * the CLI itself looks for (`esputnikCredentialKey`, above) — pruning any
+ * existing entry for this `serverKey` first, bare or `|`-suffixed, so a
+ * reconnect (renewing a dead token, see CLAUDE.md's eSputnik OAuth renewal
+ * note) always overwrites in place, and so a stale bare-keyed entry from
+ * before this fix (or an SDK-generated broken stub under the same key) never
+ * lingers alongside the real one. Preserves every other top-level key
+ * (`claudeAiOauth`, other services' `mcpOAuth` entries) untouched.
+ * Read-then-write with no lock — the window is small and this project
+ * accepts that class of low-probability race at its current scale (same
+ * reasoning as the design's OAuth security notes).
  */
 export async function writeEsputnikCredential(slug: string, serverKey: string, tokens: EsputnikTokenSet): Promise<void> {
   const filePath = credentialsFile(slug);
@@ -273,7 +299,7 @@ export async function writeEsputnikCredential(slug: string, serverKey: string, t
   for (const key of Object.keys(mcpOAuth)) {
     if (key === serverKey || key.startsWith(`${serverKey}|`)) delete mcpOAuth[key];
   }
-  mcpOAuth[serverKey] = { serverName: serverKey, serverUrl: ESPUTNIK_SERVER_URL, ...tokens };
+  mcpOAuth[esputnikCredentialKey(serverKey)] = { serverName: serverKey, serverUrl: ESPUTNIK_SERVER_URL, ...tokens };
   const next = { ...raw, mcpOAuth };
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, JSON.stringify(next, null, 2), { mode: 0o600 });
