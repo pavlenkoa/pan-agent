@@ -543,8 +543,8 @@ data:
 
     ### TMDB Lookups
     ```bash
-    curl -s "https://api.themoviedb.org/3/search/tv?query=TITLE&api_key=$TMDB_API_KEY" | jq '.results[0]'
-    curl -s "https://api.themoviedb.org/3/tv/TMDB_ID/season/SEASON_NUM?api_key=$TMDB_API_KEY" | jq '{episodes: [.episodes[] | {number, name, air_date}]}'
+    curl -s "https://api.themoviedb.org/3/search/tv?query=TITLE" -H "Authorization: Bearer $TMDB_API_KEY" -H "accept: application/json" | jq '.results[0]'
+    curl -s "https://api.themoviedb.org/3/tv/TMDB_ID/season/SEASON_NUM" -H "Authorization: Bearer $TMDB_API_KEY" -H "accept: application/json" | jq '{episodes: [.episodes[] | {number, name, air_date}]}'
     ```
 
     ### Subscription check (schedule via `schedule_task`, twice daily)
