@@ -109,28 +109,30 @@ async function postPermissionMessage(
 
 /**
  * The Telegram side of the permission gate (runner/permission-gate.ts).
- * `inputPreview`'s raw JSON (which can itself contain arbitrary characters
- * — e.g. real email HTML for an eSputnik `create_email_message` payload,
- * confirmed live to include literal `<p>...</p>`) goes inside an
- * HTML-escaped `<pre>` block instead of being dumped as unescaped plain
- * text, so it actually renders as a readable, monospaced block instead of
- * a hard-to-parse wall of text — same `withHtmlFallback` shape as every
- * other send in this file: try HTML first, fall back to the unescaped
- * plain-text version (still with the same buttons) if Telegram rejects it
- * as malformed, so a formatting bug degrades instead of losing the prompt
- * outright. `callback_data` deliberately carries only `requestId` + a
- * one-letter decision code, never the tool name — see shared/types.ts's
- * `permission_decision` ControlRequest doc comment for why. Not chunked
- * like `sendTelegramReply`: the caller already bounds `inputPreview`'s
- * length, and a multi-message split would only attach the buttons to one
- * of the parts.
+ * `fieldsPreview` (permission-gate.ts's `formatInputPreview`, already
+ * flattened into plain "key: value" lines, no JSON/braces) is rendered as
+ * ordinary text under the tool name — no code block, no "Input:" label, just
+ * the fields themselves. Still HTML-escaped even though it's not `<pre>`:
+ * a value can contain arbitrary characters (e.g. real email HTML for an
+ * eSputnik `create_email_message` payload, confirmed live to include
+ * literal `<p>...</p>`), which would otherwise break the surrounding `<b>`
+ * markup or get misread as real tags. Same `withHtmlFallback` shape as
+ * every other send in this file: try HTML first, fall back to the
+ * unescaped plain-text version (still with the same buttons) if Telegram
+ * rejects it as malformed, so a formatting bug degrades instead of losing
+ * the prompt outright. `callback_data` deliberately carries only
+ * `requestId` + a one-letter decision code, never the tool name — see
+ * shared/types.ts's `permission_decision` ControlRequest doc comment for
+ * why. Not chunked like `sendTelegramReply`: the caller already bounds
+ * `fieldsPreview`'s length, and a multi-message split would only attach the
+ * buttons to one of the parts.
  */
 export async function sendPermissionRequest(
   token: string,
   chatId: number,
   requestId: string,
   toolName: string,
-  inputPreview: string,
+  fieldsPreview: string,
 ): Promise<void> {
   const label = formatToolLabel(toolName);
   const reply_markup = {
@@ -142,11 +144,11 @@ export async function sendPermissionRequest(
       ],
     ],
   };
-  const htmlText = `🔐 <b>Permission request</b>\n\n<b>Tool:</b> ${escapeHtml(label)}\n<b>Input:</b>\n<pre>${escapeHtml(inputPreview)}</pre>`;
+  const htmlText = `🔐 <b>Permission request</b>\n\n<b>Tool:</b> ${escapeHtml(label)}\n\n${escapeHtml(fieldsPreview)}`;
   const htmlResult = await postPermissionMessage(token, chatId, htmlText, reply_markup, 'HTML');
   if (htmlResult.ok) return;
   log.error('telegram_html_send_failed', new Error(htmlResult.description ?? 'unknown'), { chatId, method: 'sendMessage (permission request)' });
-  const plainText = `🔐 Permission request\n\nTool: ${label}\nInput:\n${inputPreview}`;
+  const plainText = `🔐 Permission request\n\nTool: ${label}\n\n${fieldsPreview}`;
   const plainResult = await postPermissionMessage(token, chatId, plainText, reply_markup);
   if (!plainResult.ok) throw new Error(`sendMessage (permission request) failed: ${plainResult.description ?? 'unknown'}`);
 }
