@@ -414,9 +414,14 @@ SDK `Skill`-tool invocation, plus `/skills`/`/forget_skill` for oversight —
 same shape as the memory work, no ConfigMap involved). **Shared** skills are
 now a generalized, N-skill mechanism (one `SKILL-<name>.md` ConfigMap key
 each) rather than hardcoded to `media` alone — `esputnik-query` (read-only
-eSputnik REST queries, added 2026-08-23) and `esputnik-trigger-monitor`
+eSputnik REST queries, added 2026-08-23), `esputnik-trigger-monitor`
 (scheduled trigger-campaign flatline detection via the OAuth MCP analytics
-tools, added 2026-08-29) are the second and third. Session
+tools, added 2026-08-29), and `esputnik-multilang-campaign` (builds
+translated per-country email drafts — correct language codes, per-locale
+product names/footers/prices resolved from each market's own storefront
+rather than translated freehand, always a saved draft, never auto-sent;
+added 2026-09-02, the first **write-capable** shared skill) are the second,
+third, and fourth. Session
 management is now person-facing too: `/context` (live token-usage snapshot),
 `/effort` (session-scoped effort level), `/context_limit` (app-enforced
 auto-compact ceiling, default 250,000 — the SDK's own internal ceiling scales
@@ -426,15 +431,16 @@ session, not turns handled by the model. A full security review of
 credential handling, the attachment path allowlist, MCP tool surface, and
 NFS isolation has been done once; not a recurring process yet.
 
-**Telegram permission gate for eSputnik writes** (added 2026-09-02, not yet
-verified live — see the gotcha below): a real Allow-once/Always-allow/Deny
-prompt, since `esputnikToolPolicy()`'s per-server `always_allow` never
-actually gated anything (see "eSputnik OAuth MCP tools" gotcha below) —
-until this, the only thing standing between the model and a real
-`create_email_message`/`send_broadcast`/etc. call was prompt-text
-discipline. `/permissions`/`/forget_permission` give the person visibility
-into and control over standing "always allow" grants, same shape as
-`/skills`/`/forget_skill`. This exists specifically to unblock a planned
-write-capable shared skill (`esputnik-multilang-campaign`, drafted in
-`~/esputnik-multilang-campaign-skill-plan.md` — not yet added) that needed
-a real gate to sit behind before shipping.
+**Telegram permission gate for eSputnik writes** (added 2026-09-02): a real
+Allow-once/Always-allow/Deny prompt, since `esputnikToolPolicy()`'s
+per-server `always_allow` never actually gated anything (see "eSputnik
+OAuth MCP tools" gotcha below) — until this, the only thing standing
+between the model and a real `create_email_message`/`send_broadcast`/etc.
+call was prompt-text discipline. `/permissions`/`/forget_permission` give
+the person visibility into and control over standing "always allow"
+grants, same shape as `/skills`/`/forget_skill`. This existed specifically
+to unblock `esputnik-multilang-campaign` (added 2026-09-02, same day —
+see "Current status" above), which needed a real gate to sit behind before
+shipping; confirmed the gate's existing `ESPUTNIK_WRITE_TOOL_NAMES` set
+already covered every write tool that skill needs with no further code
+changes required.

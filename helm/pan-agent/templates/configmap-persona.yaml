@@ -322,6 +322,7 @@ data:
     - **Self-service OAuth MCP tools** (richer — read AND write: send campaigns, manage contacts/segments, broadcasts, not just read-only). If the person has connected an account via `/esputnik_connect <account>`, you already have live tools named `mcp__esputnik-<account>__...` (e.g. `mcp__esputnik-work__get_account_info`) — use these directly, they need no setup from you. A person can have several accounts connected at once, each with its own tool prefix; ask which account if it's ambiguous. If they ask about eSputnik but you don't see any `mcp__esputnik-*` tools listed, tell them to run `/esputnik_connect <account>` (a short label they choose, e.g. `work`) — it walks them through connecting their own account, no admin involved. If a call to one of these tools fails with an auth-looking error, the connection likely needs renewing — tell them to run `/esputnik_connect <account>` again (same command works for a fresh connect or a renewal). If they want to forget an account entirely (not just renew it), that's `/esputnik_disconnect <account>` — its `mcp__esputnik-<account>__...` tools disappear once that pod restarts, and reconnecting later needs a fresh `/esputnik_connect`. Writes on any connected account (create/update/delete/send/etc.) pause on a real Telegram Allow-once/Always-allow/Deny prompt before they execute — that's expected, not an error; tell the person to check Telegram if a write call seems to hang.
     - **Basic-Auth read-only query skill** (older, narrower — read-only, requires the person to `/set_var` their own credentials first) — read `.claude/skills/esputnik-query/SKILL.md` in the workspace for setup and recipes. Only fall back to this for an account that hasn't been connected via `/esputnik_connect`.
     - **Trigger-campaign flatline monitor** (`.claude/skills/esputnik-trigger-monitor/SKILL.md`) — a scheduled (not ad-hoc) check for a trigger email campaign that silently stopped sending. Needs the OAuth MCP connection (same as the first bullet, not the REST skill). Not something to run proactively in chat — only fires via the two `schedule_task` entries the person sets up themselves (see the skill file for the exact cron/prompt shape); read it if they ask to set this monitor up or change how it behaves.
+    - **Multi-language campaign drafting** (`.claude/skills/esputnik-multilang-campaign/SKILL.md`) — builds translated per-country variants of an existing email message (correct language codes, per-locale product names/footers pulled from that market's own storefront, real price/stock checks), always as a saved draft, never sent automatically. Needs the OAuth MCP connection. Read it whenever asked to translate/localize a campaign or build a country-specific version of one.
 
     Prefer the MCP tools whenever they're available for the account in question.
 
@@ -911,3 +912,904 @@ data:
     3. `schedule_task(cron=<new cron>, tz="Europe/Kyiv", prompt=<same prompt as
        before>)`.
     4. Update this file's Config section to match, so it stays accurate.
+  SKILL-esputnik-multilang-campaign.md: |
+    ---
+    name: esputnik-multilang-campaign
+    description: Builds translated per-country variants of an existing eSputnik marketing email — resolving each locale's real language code, product names, footer text, and local pricing/stock from that market's own storefront rather than translating the source freehand — then saves them as reviewed drafts, never sent automatically. Use whenever the person asks to translate/localize an eSputnik campaign, or build a country-specific version of an existing message.
+    ---
+
+    # eSputnik multi-language campaign drafting
+
+    ## Why this exists
+
+    Translating a marketing email is not just running the source text through a
+    translator. Built and validated live 2026-09-01/02 against real Ksisters
+    accounts: a naive translation gets product names, footer legal text, and even
+    prices subtly wrong, because each of those needs to come from that specific
+    locale's own storefront/account data, not from the source language — a literal
+    translation of the source's product name landed as a real, human-visible wrong
+    word in a sent email (see the product-name gotcha below). This skill packages
+    that discipline, plus the price/stock lookup and DOM-editing tooling built to
+    support it, so it doesn't have to be re-derived by hand every time.
+
+    ## Prerequisites
+
+    Needs an eSputnik account connected via the **OAuth MCP**
+    (`/esputnik_connect <account>`) — not `esputnik-query`'s Basic-Auth REST skill,
+    since the write tools this skill needs (`create_email_message`,
+    `update_email_message_translation`, etc.) only exist on the OAuth connection.
+    Look for tools named `mcp__esputnik-<account>__...` in your toolset; if none
+    exist, tell the person to run `/esputnik_connect <account>` first and stop —
+    there's nothing to do yet. If more than one account is connected, ask which one
+    before doing anything else — accounts can cover entirely different,
+    non-overlapping markets (see "Account/market map discipline" below), so don't
+    guess.
+
+    ## Scope and safety posture
+
+    Only ever call these eSputnik tools from this skill:
+    - **Reads/exports:** `get_account_info`, `list_email_interfaces`,
+      `get_email_message_export`, `get_email_message_view_link`,
+      `get_email_message_preview_png`.
+    - **Uploads/writes:** `prepare_email_message_upload`, `create_email_message`,
+      `update_email_message`, `update_email_message_translation`,
+      `delete_email_message_translation`.
+
+    **Never call `send_broadcast` or `send_email_message` from this skill, no
+    matter what's asked** — repeated in "Out of scope" below because it matters
+    twice. The deliverable is always a saved draft the person reviews and sends
+    themselves from the eSputnik UI, never something this skill sends on their
+    behalf.
+
+    Every write tool listed above except `prepare_email_message_upload` (which
+    only mints a signed upload URL, not a mutation) already pauses on a real
+    Telegram Allow-once/Always-allow/Deny prompt before it executes — that's an
+    existing, app-level mechanism (see CLAUDE.md's eSputnik section), not
+    something this skill has to build. If a write call seems to hang, that's
+    expected — tell the person to check Telegram, don't retry or assume failure.
+
+    ## Confirmation gate — a chat-level plan, on top of the Telegram write gate above
+
+    The Telegram button prompt shows one call's raw arguments in isolation — useful,
+    but not the same as letting the person sanity-check the *whole* picture before
+    any button even appears. So, in addition to that:
+
+    - **Before any write call**, reply with a compact plan and end the turn — wait
+      for the person's plain-text go-ahead as their *next* message. Never infer
+      consent from something said earlier in the conversation. The plan must
+      include:
+      - Target message id and the resolved language(s) being built.
+      - The country → eSputnik-language-code table for this run (see the gotcha
+        below — this needs a human to eyeball it, not just a self-assertion).
+      - The exact sender string(s) to be used, per `list_email_interfaces`.
+      - The resolved product name **per locale**, pulled from that locale's own
+        storefront — never a translation of the source name (see below).
+      - Any price/stock substitutions (formatted the way the real site shows
+        them) or content-block removals.
+    - **On any stock/pricing ambiguity found mid-run** (a variant out of stock
+      somewhere, unclear whether a sibling sku is an acceptable swap): stop
+      immediately, present the concrete options (swap to a sibling sku / link to
+      a fallback page / drop the block entirely), end the turn, wait for the
+      reply. Never default silently to any of the three.
+    - Reads, exports, and price/stock lookups stay unrestricted — only actual
+      `create_*`/`update_*`/`delete_*` calls and content decisions that are hard
+      to walk back need this stop.
+
+    ## Language-code resolution — country/TLD code is not the eSputnik language code
+
+    `update_email_message`'s `languageCode` (the base message's own language) is
+    server-validated against a real ISO 639-1 enum — a wrong code errors loudly.
+    `update_email_message_translation`'s `language` is **not** validated — a
+    wrong-but-plausible code is silently accepted and reported as success. No
+    error is never proof a code is right; the pre-write plan above exists partly
+    to catch this by eye before it's written.
+
+    Confirmed mismatches (country/TLD code → real eSputnik/ISO 639-1 language
+    code), most from live validation errors or the account's own footer-module
+    names, not guesses:
+
+    | Country / TLD | eSputnik language code | Note |
+    |---|---|---|
+    | `ua` | `uk` | server-rejected `"ua"` live: `400 "wrong language codes [ua]"` |
+    | `ee` | `et` | translation endpoint silently accepted the wrong `"ee"` — caught only by the person eyeballing the UI |
+    | `cz` | `cs` | |
+    | `se` | `sv` | domain key is the country, not the language |
+    | `dk` | `da` | same shape of mismatch |
+    | `uk` (domain, e.g. `ksisters.uk`) | `en` | **careful:** this domain key (United Kingdom) and the *language* code `uk` (Ukrainian, used by `ua`/`.com.ua`) are the same two letters with unrelated meanings — don't let the string match imply a connection |
+    | `gr` | `el` | same shape of mismatch as above, flagged `assumed` not yet hit live — verify before relying on it |
+    | `si` | `sl` | same, flagged `assumed` |
+    | `at` | `de` | Austria shares Germany's code — if it ever needs distinct copy, domain alone won't reveal that |
+    | `be` | **no single code** | see below |
+
+    Most others (`lv`, `lt`, `fi`, `sk`, `pl`, `hu`, `ro`, `bg`, `pt`, `es`, `it`,
+    `fr`, `hr`) match their own domain key — still worth a sanity check per
+    account rather than assumed universally correct.
+
+    **`be` (Belgium) has no single language code at all.** This account's own
+    footer-module library splits it into `BE NEW (fr)`/`BE NEW (de)` — French- and
+    German-speaking Belgium, not the more commonly assumed French/Dutch split, and
+    not generic France/Germany either. Know which language *variant* you're
+    building before picking a code; domain alone is never enough for `be`.
+
+    Recovering from a wrong translation-language key: delete
+    (`delete_email_message_translation`) and re-add under the correct one —
+    confirmed live this works even though the delete call itself can return a
+    `500` with an empty body (the deletion had actually succeeded despite the
+    broken response — verify via `get_email_message_export` before trusting
+    either response, never assume a `500` means nothing happened).
+
+    ## Account/market map discipline
+
+    Always re-run `get_account_info` + `list_email_interfaces` on whichever
+    account is actually connected before assuming what it covers — **one
+    eSputnik account is not guaranteed to cover every country a brand sells in.**
+    Confirmed live: Ksisters runs at least two separate eSputnik accounts, one
+    covering Ukraine + Baltics + Nordics + UK/NL/BE, a different one covering
+    Central/Southern/Western Europe (cz/sk/pl/de/bg/fr/hr) — don't build a
+    market's content on an account that has no real sender interface for it; that
+    would silently fall back to a placeholder/staging sender or fail outright.
+
+    Worked example (Ksisters, one real account, confirmed via
+    `list_email_interfaces` 2026-09-02) — sender format is
+    `"ksisters.<tld>" <hello@ksisters.<tld>>` for every locale **except**
+    Ukraine, which uses `ksisters.com.ua` in **both** the display name and the
+    email address (not `ksisters.ua`, which doesn't resolve as a domain at all).
+    This is a Ksisters-specific pattern, not a universal rule — always read the
+    real sender strings from `list_email_interfaces` for whichever account is
+    connected, never assume this exact format applies elsewhere.
+
+    ## Content-editing principles: DOM targeting, never text substitution
+
+    eSputnik/Stripo exports tag almost every translatable text node and image
+    with a stable identifier already baked in by the visual editor: `data-cid` on
+    text blocks, `data-alt-cid`/`data-title-cid` on images (pairing with `alt`/
+    `title`). Target these directly — never regex/string-replace on serialized
+    HTML, which risks accidental double-matches, encoding drift, and subtle
+    whitespace/quote differences. Use `edit_message_html.py` (below) for this;
+    `--list-cids` on the source HTML gives a full inventory before touching
+    anything.
+
+    **Product names: never translate the source message's own product-name text
+    outward.** Confirmed live 2026-09-02: doing so produced real, human-visible
+    wrong text — a literal translation of the CZ source's "Tužka" (pencil) became
+    Ukrainian "Олівець" (pencil), but the actual UA product is called "Лайнер"
+    (liner) on `ksisters.com.ua` itself — a different noun a reader notices
+    immediately, not a phrasing choice. Root cause traced one level further: the
+    *source* template's own product-name text was already a hand-shortened phrase,
+    not copied from its own site either — so translating it outward just carries
+    that source-specific word choice somewhere it never belonged. **Resolve every
+    locale's product name from that locale's own storefront instead** — the
+    price/stock lookup below already returns this (`variants[].name`, matched by
+    sku) as part of the same call, no separate lookup needed. Don't discard the
+    `name` field after reading `price`/`availability` off the same response.
+
+    **Removing a whole content block cleanly, not just hiding one row.** The
+    Stripo/eSputnik export nests each visual sub-element (image row, heading row,
+    paragraph row, button row) in its own inner `<tr>`, all sharing one outer
+    `<td class="esd-structure">` that groups the whole visual "block" — that
+    outer `td`'s own parent `<tr>` is the real section boundary. Removing only
+    the innermost row (e.g. just the image) leaves the heading/paragraph/button
+    rows behind, silently broken. `edit_message_html.py`'s `remove_blocks`
+    handles this correctly (locate by any known cid in the block, walk up to the
+    nearest `td.esd-structure`, remove *that* td's parent `tr`) — never hand-roll
+    a narrower removal. Verify with `--list-cids` before and after a removal if
+    unsure the whole block moved — element identity from a parse is only
+    meaningful within one script invocation, never across two separate runs.
+
+    ## Upload/write mechanics
+
+    - `prepare_email_message_upload(operation, message_id?, language?)` returns a
+      short-lived (~5 min) upload session with signed PUT URLs for `html`/`css`/
+      `ampHtml`. Two modes: `operation="create"` with **no** `message_id` (a
+      brand-new message; passing `message_id` here is rejected) vs.
+      `operation="update"` with `message_id`[+`language`] (a translation-variant
+      upload for an existing message). Not itself gated by the Telegram prompt —
+      only the `create_*`/`update_*` call that follows is.
+    - Upload with plain `curl -X PUT --data-binary @file` and the right
+      `Content-Type` — no auth header needed, the token is embedded in the URL.
+      **Transient gotcha:** a small fraction of sessions come back
+      `{"error":"Invalid upload token signature."}` (403) on the **css** PUT
+      specifically, while html on the same session succeeds, well inside the 5
+      min window (not a simple expiry, root cause unconfirmed). Fix: re-run
+      `prepare_email_message_upload` for that language and retry both PUTs on the
+      fresh session — don't fight the old token.
+    - `create_email_message(payload, template=false|true)` /
+      `update_email_message(message_id, payload)`: `payload.from` **must** be one
+      exact string from `list_email_interfaces` (e.g.
+      `"\"ksisters.ee\" <hello@ksisters.ee>"`) — separate `fromEmail`/`fromName`
+      keys fail with `400 "From must be set"`. `payload.preheader` is **rejected**
+      on both calls (the error names `update_email_metadata` instead, but the
+      simpler fix is editing the HTML's own hidden preheader `<span>` in-DOM,
+      same as every other translatable field). `template` is a top-level arg on
+      `create_email_message`, not inside `payload`, and isn't accepted at all on
+      `update_email_message` (fixed at create time).
+    - `update_email_message_translation(message_id, language, payload)` — prefer
+      `uploadSessionId` over the older inline `html` field. **Self-verify by
+      reading the message back after every write** (`get_email_message_export`)
+      — the endpoint can answer 2xx for a write that didn't actually apply. The
+      very first variant added to a message has a known read-back race
+      (`verification.reason: "first_variant_propagation"`) — re-check with
+      `get_email_message_export` rather than trusting a single read.
+    - `delete_email_message_translation` can return a `500` with an empty body
+      even when the deletion actually succeeded — verify via
+      `get_email_message_export` before concluding either way, same rule as the
+      language-code recovery step above.
+
+    ## Footer text: use the account's canonical saved modules, never translate fresh
+
+    This account's eSputnik visual editor has a saved-blocks library with a
+    pre-approved footer per locale — no MCP/API tool can read that library
+    directly (`list_email_messages(template=true)` returns empty; there's no
+    `list_blocks`/`get_block`-shaped tool, and the Stripo saved-blocks feature has
+    no corresponding REST resource at all). **Never generate or translate footer
+    copy from scratch** — that's the exact failure mode this exists to prevent.
+
+    Workaround: harvest the canonical text once from a real message that already
+    has every module inserted, ship it as a static per-locale reference (like the
+    language-code table above), and copy it in verbatim via the same `data-cid`
+    targeting as everything else. The table below was harvested 2026-09-02 from
+    Ksisters message 4666580 (base `uk`, translations
+    `et,en,fi,sv,nl,lv,lt,da,fr,de`, one locale per named module) — a starting
+    point for that specific account, not a universal reference:
+
+    | Locale | "About" menu | "Contact" menu | Unsubscribe link text |
+    |---|---|---|---|
+    | uk | ПРО КОМПАНІЮ | КОНТАКТИ | натисни тут |
+    | et | ETTEVÕTTE KOHTA | KONTAKTID | klõpsa siia |
+    | en | ABOUT THE COMPANY | CONTACTS | click here |
+    | fi | YHTIÖSTÄ | YHTEYSTIEDOT | tähän |
+    | sv | OM OSS | KONTAKTA OSS | klicka här |
+    | nl | OVER ONS BEDRIJF | CONTACT OPNEMEN | hier |
+    | lv | PAR UZŅĒMUMU | KONTAKTI | noklikšķiniet šeit |
+    | lt | APIE ĮMONĘ | KONTAKTAI | spauskite čia |
+    | da | OM VIRKSOMHEDEN | KONTAKTPERSONER | her |
+    | fr (BE) | À PROPOS DE L'ENTREPRISE | CONTACTS | clique ici |
+    | de (BE) | ÜBER UNS | KONTAKTE | klicke hier |
+
+    (This is a quick-reference identity check, not the complete text to copy —
+    read the full unsubscribe sentence and every other footer field from message
+    4666580's own export via `get_email_message_export` before writing, don't
+    retype from this table alone.) `fr`/`de` here are Belgium-specific — the
+    module names are literally `BE NEW (fr)`/`BE NEW (de)` — don't reuse for
+    generic France/Germany footers.
+
+    **If the connected account isn't this Ksisters account, or a needed locale
+    isn't in the table, stop and ask** — don't fall back to translating it fresh.
+    Re-harvesting for a different account follows the same technique: ask the
+    person (or find in the eSputnik UI) which message has every locale's footer
+    module already inserted, export each translation, and build the same table
+    fresh. Re-harvest periodically for this account too if its modules change —
+    there's no live freshness check possible, only a fresh harvest.
+
+    ## Price/stock lookup and per-locale product name — one call answers both
+
+    Run this whenever a message's content includes a priced/stocked product, or
+    whenever a per-locale product name is needed (see the DOM-editing section
+    above — same data, same call). Use `--match-sku` whenever the source email's
+    own product link already has `?sku=...` (many do) — that's the exact variant,
+    no resolution needed. Only fall back to `--match-price --match-domain` when
+    the source link is a bare canonical URL with no sku.
+
+    **Stock is a real per-market blocker, not just a pricing detail — needs a
+    human decision, never a silent default.** Two genuinely different cases
+    confirmed live 2026-09-02, both feeding the confirmation gate's stock-stop
+    above:
+    1. A specific variant out of stock in the target markets, but a sibling
+       variant of the same product is fine everywhere (e.g. a shade swap) — the
+       full-variant listing (no `--match-sku`) finds the sibling; propose the
+       swap, let the person decide.
+    2. A single-variant product out of stock everywhere, no sibling to swap to —
+       propose dropping the whole content block rather than linking to an
+       unbuyable product or faking availability.
+
+    A product can also have **no `sku` field at all** in its JSON-LD even when
+    in stock — the sku may only exist as the `?sku=...` query param on the
+    offer's own URL. `--match-sku` reporting "not found" is not proof the sku is
+    wrong; cross-check with a slug-only lookup first.
+
+    **Price-formatting gotcha:** a JSON-LD price like `72.90` decodes as the bare
+    float `72.9` — inserting that unformatted drops the trailing zero the real
+    site shows. `price_lookup.py`'s `price_formatted` field already handles
+    this (2 decimal places for EUR/PLN/GBP/SEK/DKK; whole numbers for
+    CZK/HUF/UAH/RON, confirmed whole-number on-site) — always use
+    `price_formatted`, never `str(price)`/raw interpolation of `price` itself.
+    Verify per-currency against the real site's own display if a new currency
+    shows up that isn't in either bucket yet.
+
+    ## Scripts
+
+    Two scripts. Write both to `<workspace>/esputnik-scripts/` on first use and
+    reuse thereafter — check the version marker in each file's header comment;
+    rewrite if it's missing or older than the version shipped here, since a
+    stale copy silently reintroduces bugs already fixed. Uses real `requests`
+    and `beautifulsoup4` (installed system-wide via apt — `python3-requests`/
+    `python3-bs4` — no `pip install` needed or expected).
+
+    ### `esputnik-scripts/price_lookup.py` (v1)
+
+    ```python
+    #!/usr/bin/env python3
+    """
+    Ksisters (multi-country K-beauty storefront) price lookup. v1
+
+    Given a product slug, fetches the schema.org ProductGroup JSON-LD from
+    https://ksisters.<tld>/product/<slug> for each configured country domain
+    (see domains.json) and returns every size variant's price/currency.
+
+    Direct WebFetch on ksisters.* gets bot-blocked; plain requests with a
+    browser User-Agent works fine (confirmed 2026-09-01).
+
+    Products only expose a *default* variant on the bare slug URL, which is
+    NOT necessarily the size/shade you care about (e.g. the bare CZ product
+    URL defaults to 20 ml, but an email might be pricing the 60 ml line; a
+    shade-variant product like a lip tint has NO discoverable "size" text at
+    all -- the variant name is "4.7 g No.901 True Peach", so pattern-matching
+    on the trailing size text alone doesn't distinguish shades). What DOES
+    reliably identify a specific variant: `sku`. Confirmed live 2026-09-01 on
+    two unrelated products (a size-variant cream, a shade-variant lip tint)
+    that Ksisters uses ONE GLOBAL SKU per exact variant, shared identically
+    across every country domain -- only price/currency/copy differ per
+    country, the sku number itself does not change. So:
+      - If you already know the sku (e.g. parsed from the source email's own
+        product `href`, which often has `?sku=NNNNNNN` right in the link --
+        that IS the exact variant, no guessing needed), pass --match-sku.
+      - If you only know a displayed price (no sku in the source link, e.g. a
+        bare product URL defaulting to some variant), pass --match-price plus
+        --match-domain to resolve which sku that price belongs to on the
+        source country, then the same sku is looked up everywhere else.
+    Either way, matching happens by sku, never by re-parsing a size/shade
+    label out of localized variant names (those aren't reliably parseable and
+    aren't needed once you have the sku).
+
+    Usage:
+      python3 price_lookup.py <slug> [options]
+
+    Options:
+      --domains cz,pl,de       comma-separated subset of domains.json keys (default: all)
+      --match-sku 2110999      exact sku to look up across all requested domains (preferred -- no guessing)
+      --match-price 1402       fallback: source price to resolve a sku from, when you don't already have one
+      --match-domain cz        domain to resolve --match-price against (default: first requested domain)
+      --refresh                bypass cache, re-fetch from network
+      --cache-ttl-hours 24     cache freshness window (default 24)
+      --json                   print raw JSON instead of a table
+      --timeout 8              per-request timeout seconds (default 8)
+      --workers 8              parallel fetch workers (default 8)
+
+    Examples:
+      # all variants, all known countries
+      python3 price_lookup.py dr-reju-all-advanced-pdrn-rejuvenating-cream --domains cz,pl,de
+
+      # exact known sku (e.g. parsed from the source email's product link), across several countries
+      python3 price_lookup.py laka-perfect-twin-lip --match-sku 2111230 --domains cz,pl,sk,de
+
+      # only a displayed price is known (no sku in the source link) -- resolve sku from CZ's 1402 Kc first
+      python3 price_lookup.py dr-reju-all-advanced-pdrn-rejuvenating-cream \\
+          --match-domain cz --match-price 1402 --domains cz,pl,de,hu
+    """
+    import argparse
+    import json
+    import os
+    import re
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import requests
+
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    DOMAINS_FILE = os.path.join(SCRIPT_DIR, "domains.json")
+    CACHE_DIR = os.path.join(SCRIPT_DIR, "cache")
+
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+
+    SIZE_RE = re.compile(
+        r"(\d+(?:[.,]\d+)?\s*(?:ml|g|kg|szt\.?|ks|db\.?|buc|kom|kos|τεμ))\s*$",
+        re.IGNORECASE,
+    )
+
+    # Currencies confirmed live (2026-09-02) to always show as whole numbers on
+    # the actual Ksisters storefronts (CZK/HUF/UAH/RON) vs. ones confirmed shown
+    # with cents (EUR/PLN) -- JSON-LD's raw float drops trailing zeros (72.90
+    # decodes as 72.9), so formatting must be explicit, not str(price).
+    WHOLE_NUMBER_CURRENCIES = {"CZK", "HUF", "UAH", "RON"}
+    DECIMAL_CURRENCIES = {"EUR", "PLN", "GBP", "SEK", "DKK"}
+
+
+    def format_price(price, currency):
+        if price is None:
+            return None
+        if currency in WHOLE_NUMBER_CURRENCIES:
+            return str(int(round(price)))
+        if currency in DECIMAL_CURRENCIES:
+            return f"{price:.2f}"
+        # Unknown currency: only force decimals if the value actually has a
+        # fractional part -- don't invent ".00" for a currency never observed
+        # with cents.
+        return f"{price:.2f}" if price != int(price) else str(int(price))
+
+
+    def load_domains():
+        with open(DOMAINS_FILE, encoding="utf-8") as f:
+            return json.load(f)["domains"]
+
+
+    def cache_path(domain_key, slug):
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
+        return os.path.join(CACHE_DIR, f"{domain_key}__{safe}.json")
+
+
+    def load_cache(domain_key, slug, ttl_hours):
+        path = cache_path(domain_key, slug)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        age_hours = (time.time() - data.get("_fetched_at", 0)) / 3600
+        if age_hours > ttl_hours:
+            return None
+        return data
+
+
+    def save_cache(domain_key, slug, data):
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        data = dict(data)
+        data["_fetched_at"] = time.time()
+        with open(cache_path(domain_key, slug), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+    def extract_size(name):
+        m = SIZE_RE.search((name or "").strip())
+        return m.group(1).strip() if m else None
+
+
+    def fetch_variants(domain_key, base_url, slug, timeout):
+        url = f"{base_url}/product/{slug}"
+        try:
+            resp = requests.get(url, headers={"User-Agent": UA}, timeout=timeout)
+        except requests.RequestException as e:
+            return {"domain": domain_key, "url": url, "error": f"request failed: {e}"}
+
+        if resp.status_code != 200:
+            return {"domain": domain_key, "url": url, "error": f"HTTP {resp.status_code}"}
+
+        blocks = re.findall(
+            r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            resp.text, re.DOTALL,
+        )
+        group = None
+        for b in blocks:
+            try:
+                data = json.loads(b)
+            except json.JSONDecodeError:
+                continue
+            items = data if isinstance(data, list) else [data]
+            for it in items:
+                if isinstance(it, dict) and it.get("@type") == "ProductGroup":
+                    group = it
+                    break
+            if group:
+                break
+
+        if not group:
+            return {
+                "domain": domain_key, "url": url,
+                "error": "no ProductGroup JSON-LD found (product likely not sold "
+                         "on this site, or the slug/URL structure differs here)",
+            }
+
+        # `name` here is the canonical per-locale product name (confirmed live
+        # 2026-09-02 against the actual rendered site) -- use THIS for any email
+        # content, never a translation of the source-language product name. A
+        # freehand translation drifts from what the site actually calls the
+        # product (e.g. "Tuzka"/pencil translated to Ukrainian became
+        # "Olivets"/pencil, but the real ksisters.com.ua product is "Lainer",
+        # i.e. liner -- a different word, not just a style choice).
+        variants = []
+        for v in group.get("hasVariant", []):
+            offers = v.get("offers") or {}
+            name = v.get("name", "")
+            price = offers.get("price")
+            currency = offers.get("priceCurrency")
+            variants.append({
+                "sku": v.get("sku"),
+                "name": name,
+                "size": extract_size(name),
+                "price": price,
+                "price_formatted": format_price(price, currency),
+                "currency": currency,
+                "availability": (offers.get("availability") or "").rsplit("/", 1)[-1] or None,
+                "url": offers.get("url"),
+            })
+
+        if not variants and group.get("offers"):
+            # Single-variant products carry their one Offer directly on the
+            # ProductGroup instead of via hasVariant (confirmed live 2026-09-02,
+            # e.g. dr-reju-all-pdrn-essentials-trio). Synthesize one variant so
+            # callers don't have to special-case this.
+            offers = group["offers"]
+            price = offers.get("price")
+            currency = offers.get("priceCurrency")
+            variants.append({
+                "sku": group.get("sku"),
+                "name": group.get("name", ""),
+                "size": extract_size(group.get("name", "")),
+                "price": price,
+                "price_formatted": format_price(price, currency),
+                "currency": currency,
+                "availability": (offers.get("availability") or "").rsplit("/", 1)[-1] or None,
+                "url": offers.get("url"),
+            })
+
+        return {
+            "domain": domain_key,
+            "url": url,
+            "product_name": group.get("name"),
+            "brand": (group.get("brand") or {}).get("name"),
+            "variants": variants,
+        }
+
+
+    def get_domain_data(domain_key, domain_info, slug, timeout, ttl_hours, refresh):
+        if not refresh:
+            cached = load_cache(domain_key, slug, ttl_hours)
+            if cached is not None:
+                cached["_cache"] = "hit"
+                return cached
+        data = fetch_variants(domain_key, domain_info["url"], slug, timeout)
+        data["language"] = domain_info["language"]
+        data["language_status"] = domain_info["language_status"]
+        data["_cache"] = "miss"
+        save_cache(domain_key, slug, data)
+        return data
+
+
+    def find_variant_by_price(result, target_price):
+        if "variants" not in result:
+            return None
+        best, best_diff = None, None
+        for v in result["variants"]:
+            if v.get("price") is None:
+                continue
+            diff = abs(v["price"] - target_price)
+            if best_diff is None or diff < best_diff:
+                best_diff, best = diff, v
+        return best
+
+
+    def find_variant_by_sku(result, sku):
+        if "variants" not in result:
+            return None
+        sku = str(sku)
+        for v in result["variants"]:
+            if str(v.get("sku")) == sku:
+                return v
+        return None
+
+
+    def main():
+        ap = argparse.ArgumentParser(description="Look up Ksisters product prices per size, per country.")
+        ap.add_argument("slug", help="product slug, e.g. dr-reju-all-advanced-pdrn-rejuvenating-cream")
+        ap.add_argument("--domains", help="comma-separated domain keys from domains.json (default: all)")
+        ap.add_argument("--match-sku", help="exact sku to look up across all requested domains (preferred; sku is stable across countries)")
+        ap.add_argument("--match-price", type=float, help="fallback: source price to resolve a sku from, when you don't already have one")
+        ap.add_argument("--match-domain", help="domain key to resolve --match-price against (default: first requested domain)")
+        ap.add_argument("--refresh", action="store_true", help="bypass cache")
+        ap.add_argument("--cache-ttl-hours", type=float, default=24)
+        ap.add_argument("--json", action="store_true", help="print raw JSON instead of a table")
+        ap.add_argument("--timeout", type=float, default=8)
+        ap.add_argument("--workers", type=int, default=8)
+        args = ap.parse_args()
+
+        all_domains = load_domains()
+        if args.domains:
+            keys = [k.strip() for k in args.domains.split(",") if k.strip()]
+            unknown = [k for k in keys if k not in all_domains]
+            if unknown:
+                print(f"Unknown domain key(s): {unknown}. Known: {sorted(all_domains)}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            keys = list(all_domains.keys())
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {
+                ex.submit(get_domain_data, k, all_domains[k], args.slug, args.timeout, args.cache_ttl_hours, args.refresh): k
+                for k in keys
+            }
+            for fut in as_completed(futs):
+                results[futs[fut]] = fut.result()
+
+        def lang_tag(domain_key):
+            r = results.get(domain_key, {})
+            lang = r.get("language")
+            status = r.get("language_status")
+            return f"{lang}{'?' if status == 'assumed' else ''}" if lang else "?"
+
+        output = {"slug": args.slug, "results": results}
+        target_sku = args.match_sku
+        matched = None
+        match_domain = None
+
+        if target_sku is None and args.match_price is not None:
+            match_domain = args.match_domain or keys[0]
+            ref = results.get(match_domain)
+            if ref is None or "variants" not in ref:
+                print(f"Cannot match: no data for domain '{match_domain}'", file=sys.stderr)
+                sys.exit(1)
+            matched = find_variant_by_price(ref, args.match_price)
+            if matched is None:
+                print(f"No priced variants found on '{match_domain}'", file=sys.stderr)
+                sys.exit(1)
+            target_sku = matched.get("sku")
+            output["resolved_sku_from_price"] = {"domain": match_domain, "variant": matched}
+
+        if target_sku is not None:
+            output["per_country_for_sku"] = {}
+            for k, r in results.items():
+                if "variants" not in r:
+                    output["per_country_for_sku"][k] = {"error": r.get("error")}
+                    continue
+                v = find_variant_by_sku(r, target_sku)
+                output["per_country_for_sku"][k] = v if v is not None else {"error": f"sku {target_sku} not found/sold on this site"}
+
+        if args.json:
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return
+
+        if target_sku is not None:
+            if matched is not None:
+                print(f"Resolved sku {target_sku} from {match_domain} price {matched.get('price_formatted')} {matched.get('currency')}")
+            print(f"{'domain':8} {'lang':6} {'price':>10} {'currency':8} {'sku':14} {'name':40} note")
+            for k in keys:
+                v = output["per_country_for_sku"].get(k, {})
+                if "error" in v:
+                    print(f"{k:8} {lang_tag(k):6} {'':>10} {'':8} {'':14} {'':40} {v['error']}")
+                elif v.get("price") is None:
+                    avail = v.get("availability") or "unknown"
+                    print(f"{k:8} {lang_tag(k):6} {'—':>10} {v.get('currency', ''):8} {str(v.get('sku')):14} {(v.get('name') or ''):40} no price ({avail})")
+                else:
+                    print(f"{k:8} {lang_tag(k):6} {v.get('price_formatted'):>10} {v.get('currency', ''):8} {str(v.get('sku')):14} {(v.get('name') or ''):40}")
+        else:
+            for k in keys:
+                r = results[k]
+                if "variants" not in r:
+                    print(f"=== {k} ({lang_tag(k)}) === ERROR: {r.get('error')}")
+                    continue
+                print(f"=== {k} ({lang_tag(k)}) === {r.get('product_name')}")
+                for v in r["variants"]:
+                    label = v.get("size") or v.get("name")
+                    price_str = f"{v.get('price_formatted'):>10}" if v.get("price_formatted") is not None else f"{'—':>10}"
+                    print(f"  {label:10} {price_str} {v.get('currency', ''):5} sku={v.get('sku')} [{v.get('availability')}]")
+
+
+    if __name__ == "__main__":
+        main()
+    ```
+
+    ### `esputnik-scripts/domains.json` — starting reference for the Ksisters account
+
+    Adapt this per account: the URL pattern (`ksisters.<tld>/product/<slug>`) and
+    the whole domain list are specific to this brand's storefronts. For a
+    different connected account, rebuild this file against that brand's own
+    per-country domains before running the script — the *technique* (fetch each
+    country's product page, parse `ProductGroup` JSON-LD, match by sku) carries
+    over; the hardcoded URLs don't.
+
+    ```json
+    {
+      "_comment": "Storefront base URL + eSputnik/ISO 639-1 language code per country/TLD key. Live-checked via `curl -o /dev/null -w %{http_code}` with a browser UA against the base URL. 200 means the storefront resolves; it does NOT guarantee that storefront actually sells any given product (that's still per-product, checked at lookup time). CORRECTION 2026-09-02: bare 'ksisters.ua' does NOT resolve -- the real Ukrainian domain is 'ksisters.com.ua' (confirmed both by DNS/HTTP 200 AND by a real sender interface \"ksisters.com.ua\" <hello@ksisters.com.ua> present on a production eSputnik account). Don't reuse the old ksisters.ua guess.",
+      "checked": "2026-09-02",
+      "_language_comment": "language is the eSputnik/ISO 639-1 code to use with update_email_message(languageCode=...) / update_email_message_translation(language=...) for that storefront's own market -- NOT necessarily the same string as the domain key (the whole point of this field: ua/ee/cz/si are confirmed cases where domain key != language code, don't assume they always match). language_status: 'confirmed' = verified live against a real eSputnik message's own languageCode/languages field or a server-side validation error; 'assumed' = standard ISO 639-1 guess for that country, never actually verified against this account's data -- treat as a starting point to double-check, not gospel, same as everything else in this file.",
+      "domains": {
+        "cz": {"url": "https://ksisters.cz", "language": "cs", "language_status": "confirmed"},
+        "sk": {"url": "https://ksisters.sk", "language": "sk", "language_status": "confirmed"},
+        "pl": {"url": "https://ksisters.pl", "language": "pl", "language_status": "confirmed"},
+        "hu": {"url": "https://ksisters.hu", "language": "hu", "language_status": "assumed"},
+        "at": {"url": "https://ksisters.at", "language": "de", "language_status": "assumed", "note": "Austria speaks German -- shares the 'de' code with ksisters.de itself, a many-to-one case like Belgium below, just monolingual. If Austria ever needs its own footer/copy variant distinct from Germany's, domain alone won't tell you that -- same caution as the BE case."},
+        "de": {"url": "https://ksisters.de", "language": "de", "language_status": "confirmed"},
+        "ro": {"url": "https://ksisters.ro", "language": "ro", "language_status": "assumed"},
+        "bg": {"url": "https://ksisters.bg", "language": "bg", "language_status": "confirmed"},
+        "gr": {"url": "https://ksisters.gr", "language": "el", "language_status": "assumed", "note": "Greek ISO code is 'el', not 'gr' -- same shape of mismatch as ua/ee/cz/si, flagged in research notes as 'known pattern, not yet hit live' -- verify before relying on it."},
+        "pt": {"url": "https://ksisters.pt", "language": "pt", "language_status": "assumed"},
+        "es": {"url": "https://ksisters.es", "language": "es", "language_status": "assumed"},
+        "it": {"url": "https://ksisters.it", "language": "it", "language_status": "assumed"},
+        "fr": {"url": "https://ksisters.fr", "language": "fr", "language_status": "confirmed"},
+        "hr": {"url": "https://ksisters.hr", "language": "hr", "language_status": "confirmed"},
+        "si": {"url": "https://ksisters.si", "language": "sl", "language_status": "assumed", "note": "Slovenia's ISO code is 'sl', not 'si' -- same mismatch shape as ua/ee/cz/gr. Flagged in research notes as unconfirmed against real account data."},
+        "com": {"url": "https://ksisters.com", "language": "en", "language_status": "assumed", "note": "presumed international/default storefront -- language not verified against any real message."},
+        "ua": {"url": "https://ksisters.com.ua", "language": "uk", "language_status": "confirmed", "note": "server-validated live 2026-09-02: update_email_message rejected languageCode='ua' with 400 'wrong language codes', only 'uk' was accepted."},
+        "ee": {"url": "https://ksisters.ee", "language": "et", "language_status": "confirmed", "note": "translation endpoint silently accepted the wrong code 'ee' at write time (no validation there) -- 'et' confirmed correct only because the user caught it by eye in the UI."},
+        "lv": {"url": "https://ksisters.lv", "language": "lv", "language_status": "confirmed"},
+        "lt": {"url": "https://ksisters.lt", "language": "lt", "language_status": "confirmed"},
+        "fi": {"url": "https://ksisters.fi", "language": "fi", "language_status": "confirmed"},
+        "se": {"url": "https://ksisters.se", "language": "sv", "language_status": "confirmed", "note": "confirmed 2026-09-02 -- Swedish ISO code is 'sv', not 'se'."},
+        "dk": {"url": "https://ksisters.dk", "language": "da", "language_status": "confirmed", "note": "confirmed 2026-09-02 -- Danish ISO code is 'da', not 'dk'."},
+        "uk": {"url": "https://ksisters.uk", "language": "en", "language_status": "confirmed", "note": "confirmed 2026-09-02 -- the UK storefront's content language is English, eSputnik code 'en' (do not confuse this domain key 'uk' -- United Kingdom -- with the unrelated eSputnik language code 'uk' -- Ukrainian, used by the ua/com.ua storefront above. Same two-letter string, two completely different meanings depending on which field you're in.)"},
+        "nl": {"url": "https://ksisters.nl", "language": "nl", "language_status": "assumed"}
+      },
+      "sender_hint": {
+        "_comment": "Real sender interfaces confirmed present on a production eSputnik account (list_email_interfaces), 2026-09-02 -- pattern is \"ksisters.<tld>\" <hello@ksisters.<tld>> for every locale EXCEPT Ukraine, which uses the com.ua domain in both places.",
+        "ua": "\"ksisters.com.ua\" <hello@ksisters.com.ua>",
+        "ee": "\"ksisters.ee\" <hello@ksisters.ee>",
+        "lv": "\"ksisters.lv\" <hello@ksisters.lv>",
+        "lt": "\"ksisters.lt\" <hello@ksisters.lt>",
+        "fi": "\"ksisters.fi\" <hello@ksisters.fi>",
+        "se": "\"ksisters.se\" <hello@ksisters.se>",
+        "dk": "\"ksisters.dk\" <hello@ksisters.dk>",
+        "nl": "\"ksisters.nl\" <hello@ksisters.nl>",
+        "be": "\"ksisters.be\" <hello@ksisters.be>",
+        "uk": "\"ksisters.uk\" <hello@ksisters.uk>"
+      },
+      "no_single_language_domains": {
+        "_comment": "Domains that do NOT map to one eSputnik language code -- resolve by which language variant you're actually building, never by domain alone.",
+        "be": "Belgium is bilingual -- the same ksisters.be storefront serves both French and Dutch/Flemish shoppers, and this account's footer-module library reflects that split directly: 'BE NEW (fr)' uses eSputnik language code 'fr', 'BE NEW (de)' uses 'de' (German-speaking Belgium, not France or Germany -- see the footer-modules gotcha above). There is no single 'be' language code to put in this table; the caller must already know which language variant of Belgium it's building before picking a code."
+      },
+      "unconfirmed_or_missing": {
+        "co.uk": "resolves (200) but not investigated -- may be a UK-specific variant of the 'com' site",
+        "ie": "DNS does not resolve"
+      }
+    }
+    ```
+
+    ### `esputnik-scripts/edit_message_html.py` (v1)
+
+    ```python
+    #!/usr/bin/env python3
+    """
+    esputnik-multilang-campaign DOM editor. v1
+
+    Applies data-cid/data-alt-cid/data-title-cid-targeted edits to an
+    eSputnik/Stripo email export, and removes whole content blocks cleanly (not
+    just the innermost row). Never does text substitution on serialized HTML --
+    always parses first.
+
+    Usage:
+      python3 edit_message_html.py <input.html> --list-cids
+      python3 edit_message_html.py <input.html> <edits.json> <output.html>
+
+    edits.json shape:
+    {
+      "set_text":     {"<cid>": "new text", ...},
+      "set_attr":     {"<cid>": {"alt": "...", "title": "..."}, ...},
+      "remove_blocks": ["<cid>", ...]
+    }
+
+    A "<cid>" is matched against data-cid, data-alt-cid, and data-title-cid, in
+    that order, on any element in the document -- pass whichever value turned up
+    while inventorying the source HTML (--list-cids), regardless of which
+    attribute it actually lives on.
+
+    remove_blocks: locates the block by cid, walks up to the nearest ancestor
+    <td class="esd-structure"> (not just the immediate <tr>, which would leave
+    sibling rows -- heading/paragraph/button -- of the same visual block
+    behind), then removes THAT td's own parent <tr>. Verify with --list-cids
+    before AND after a removal if not certain the whole block moved -- this is
+    a same-process operation, so BeautifulSoup element identity is only
+    meaningful within this one script run, never across separate invocations.
+    """
+    import argparse
+    import json
+    import sys
+
+    from bs4 import BeautifulSoup
+
+    CID_ATTRS = ("data-cid", "data-alt-cid", "data-title-cid")
+
+
+    def find_by_cid(soup, cid):
+        for attr in CID_ATTRS:
+            el = soup.find(attrs={attr: cid})
+            if el is not None:
+                return el, attr
+        return None, None
+
+
+    def list_cids(soup):
+        rows = []
+        for attr in CID_ATTRS:
+            for el in soup.find_all(attrs={attr: True}):
+                cid = el.get(attr)
+                preview = (el.get_text(strip=True) or el.get("alt") or el.get("title") or "")[:60]
+                rows.append((cid, attr, el.name, preview))
+        return rows
+
+
+    def set_text(soup, cid, text):
+        el, attr = find_by_cid(soup, cid)
+        if el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
+        el.string = text
+
+
+    def set_attrs(soup, cid, attrs):
+        el, found_attr = find_by_cid(soup, cid)
+        if el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
+        for k, v in attrs.items():
+            el[k] = v
+
+
+    def remove_block(soup, cid):
+        el, attr = find_by_cid(soup, cid)
+        if el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
+        block_td = el.find_parent("td", class_="esd-structure")
+        if block_td is None:
+            raise ValueError(
+                f"cid {cid!r} (via {attr}) has no ancestor td.esd-structure -- "
+                "removing its immediate parent alone would likely leave sibling "
+                "rows of the same visual block behind; refusing to guess"
+            )
+        row = block_td.find_parent("tr")
+        if row is None:
+            raise ValueError(f"cid {cid!r}'s esd-structure td has no parent tr")
+        row.decompose()
+
+
+    def main():
+        ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        ap.add_argument("input_html")
+        ap.add_argument("edits_json", nargs="?", help="JSON file with set_text/set_attr/remove_blocks")
+        ap.add_argument("output_html", nargs="?")
+        ap.add_argument("--list-cids", action="store_true", help="print every data-cid/data-alt-cid/data-title-cid found and exit")
+        args = ap.parse_args()
+
+        with open(args.input_html, encoding="utf-8") as f:
+            soup = BeautifulSoup(f.read(), "html.parser")
+
+        if args.list_cids:
+            for cid, attr, tag, preview in list_cids(soup):
+                print(f"{cid:20} {attr:16} <{tag}>  {preview}")
+            return
+
+        if not args.edits_json or not args.output_html:
+            print("edits_json and output_html are required unless --list-cids", file=sys.stderr)
+            sys.exit(1)
+
+        with open(args.edits_json, encoding="utf-8") as f:
+            edits = json.load(f)
+
+        for cid, text in edits.get("set_text", {}).items():
+            set_text(soup, cid, text)
+        for cid, attrs in edits.get("set_attr", {}).items():
+            set_attrs(soup, cid, attrs)
+        for cid in edits.get("remove_blocks", []):
+            remove_block(soup, cid)
+
+        with open(args.output_html, "w", encoding="utf-8") as f:
+            f.write(str(soup))
+
+        print(f"wrote {args.output_html}")
+
+
+    if __name__ == "__main__":
+        main()
+    ```
+
+    ## Config
+
+    Tunable, not fixed rules — the Ksisters figures below are illustrative
+    defaults from this skill's own worked example, not universal:
+
+    - Price-lookup cache TTL: 24h (`--cache-ttl-hours` on `price_lookup.py`).
+    - Currency decimal-places buckets in `price_lookup.py`
+      (`WHOLE_NUMBER_CURRENCIES`/`DECIMAL_CURRENCIES`) — extend as new
+      currencies come up; verify against the real site's own display first.
+    - Footer reference table: re-harvest per account as described above; there's
+      no live freshness signal to trigger this automatically.
+
+    ## Out of scope
+
+    - `send_broadcast` / `send_email_message` — repeated deliberately from
+      "Scope and safety posture" above. This skill only ever produces a saved
+      draft; sending is always a separate, human action in the eSputnik UI.
+    - Segment/contact edits, workflow edits — not touched by anything in this
+      skill, regardless of what's asked mid-task.
+    - Anything the confirmation gate above would otherwise skip past — if a
+      stop point is reached and the reply is ambiguous, ask again rather than
+      picking an option on the person's behalf.

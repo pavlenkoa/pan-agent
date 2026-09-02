@@ -12,7 +12,7 @@ FROM node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       curl wget unzip ca-certificates git jq \
-      ffmpeg mediainfo python3 ripgrep tree && \
+      ffmpeg mediainfo python3 python3-requests python3-bs4 ripgrep tree && \
     rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
