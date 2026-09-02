@@ -16,6 +16,7 @@ let listStickerPacks: typeof import('./nfs.js').listStickerPacks;
 let addStickerPack: typeof import('./nfs.js').addStickerPack;
 let removeStickerPack: typeof import('./nfs.js').removeStickerPack;
 let writeEsputnikCredential: typeof import('./nfs.js').writeEsputnikCredential;
+let deleteEsputnikCredential: typeof import('./nfs.js').deleteEsputnikCredential;
 
 const SAMPLE_TOKENS = {
   accessToken: 'access-1',
@@ -44,6 +45,7 @@ beforeAll(async () => {
   addStickerPack = mod.addStickerPack;
   removeStickerPack = mod.removeStickerPack;
   writeEsputnikCredential = mod.writeEsputnikCredential;
+  deleteEsputnikCredential = mod.deleteEsputnikCredential;
 });
 
 afterAll(async () => {
@@ -315,5 +317,57 @@ describe('writeEsputnikCredential', () => {
 
     const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
     expect(Object.keys(raw.mcpOAuth)).toEqual([ESPUTNIK_KEY]);
+  });
+});
+
+describe('deleteEsputnikCredential', () => {
+  it('removes the `<serverKey>|<hash>` entry, preserving unrelated top-level keys and other mcpOAuth entries', async () => {
+    const claudeDir = path.join(dir, 'people', 'disconnector', 'claude');
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: 'main-token' },
+        mcpOAuth: {
+          [ESPUTNIK_KEY]: { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com', ...SAMPLE_TOKENS },
+          'esputnik-personal|909f472c1d8ca133': { serverName: 'esputnik-personal', serverUrl: 'https://mcp.esputnik.com' },
+        },
+      }),
+    );
+
+    await deleteEsputnikCredential('disconnector', 'esputnik-work');
+
+    const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
+    expect(raw.claudeAiOauth).toEqual({ accessToken: 'main-token' });
+    expect(Object.keys(raw.mcpOAuth)).toEqual(['esputnik-personal|909f472c1d8ca133']);
+  });
+
+  it('also removes a stale bare-keyed entry for the same serverKey', async () => {
+    const claudeDir = path.join(dir, 'people', 'disconnector-legacy', 'claude');
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({ mcpOAuth: { 'esputnik-work': { serverName: 'esputnik-work', serverUrl: 'https://mcp.esputnik.com' } } }),
+    );
+
+    await deleteEsputnikCredential('disconnector-legacy', 'esputnik-work');
+
+    const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
+    expect(raw.mcpOAuth).toEqual({});
+  });
+
+  it('is a no-op, not an error, when the file does not exist yet', async () => {
+    await expect(deleteEsputnikCredential('never-connected', 'esputnik-work')).resolves.toBeUndefined();
+  });
+
+  it('is a no-op when the file exists but has no matching entry', async () => {
+    const claudeDir = path.join(dir, 'people', 'no-match', 'claude');
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(path.join(claudeDir, '.credentials.json'), JSON.stringify({ mcpOAuth: {} }));
+
+    await deleteEsputnikCredential('no-match', 'esputnik-work');
+
+    const raw = JSON.parse(await readFile(path.join(claudeDir, '.credentials.json'), 'utf8'));
+    expect(raw.mcpOAuth).toEqual({});
   });
 });

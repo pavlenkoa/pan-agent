@@ -85,6 +85,9 @@ helm/
 | `/clear` | Start a fresh conversation (memory/tasks unaffected) |
 | `/permissions` | List tools you've always-allowed via the Telegram permission prompt |
 | `/forget_permission <toolName>` | Revoke an always-allow permission |
+| `/esputnik_connect <account>` | Connect (or reconnect) your own eSputnik account |
+| `/esputnik_accounts` | List your connected eSputnik accounts and their status |
+| `/esputnik_disconnect <account>` | Forget a connected eSputnik account entirely (restarts to apply) |
 
 All of the above are intercepted before the message ever reaches the model — the
 Telegram `/` menu is registered per-chat, so an unapproved sender never even sees

@@ -330,3 +330,33 @@ export async function writeEsputnikCredential(slug: string, serverKey: string, t
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, JSON.stringify(next, null, 2), { mode: 0o600 });
 }
+
+/**
+ * The `/esputnik_disconnect` counterpart to `writeEsputnikCredential` above —
+ * prunes both the bare and `|`-suffixed forms of `serverKey`'s entry (same
+ * two shapes that write ever has to account for) so no stale token survives
+ * under either key. A missing file or missing entry is a no-op, not an
+ * error — disconnecting an account that was never actually connected (or
+ * whose credential file was already gone) should still succeed from the
+ * ConfigMap side.
+ */
+export async function deleteEsputnikCredential(slug: string, serverKey: string): Promise<void> {
+  const filePath = credentialsFile(slug);
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(await readFile(filePath, 'utf8')) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  const mcpOAuth = { ...((raw['mcpOAuth'] as Record<string, unknown> | undefined) ?? {}) };
+  let changed = false;
+  for (const key of Object.keys(mcpOAuth)) {
+    if (key === serverKey || key.startsWith(`${serverKey}|`)) {
+      delete mcpOAuth[key];
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  await writeFile(filePath, JSON.stringify({ ...raw, mcpOAuth }, null, 2), { mode: 0o600 });
+}

@@ -219,6 +219,30 @@ export async function upsertEsputnikConnection(
   return entry;
 }
 
+/**
+ * `/esputnik_disconnect` — removes both the connection entry (what
+ * `/esputnik_accounts` lists) and the registered OAuth client (so a future
+ * `/esputnik_connect` for this account does a fresh DCR registration rather
+ * than silently reusing the old client_id — see CLAUDE.md's per-connection
+ * OAuth client-isolation note for why a stale shared client is worth
+ * avoiding). The actual token pair lives on NFS, not here — see
+ * `operator/nfs.ts`'s `deleteEsputnikCredential`, called alongside this.
+ */
+export async function removeEsputnikConnection(api: CoreV1Api, namespace: string, slug: string, account: string): Promise<boolean> {
+  let removed = false;
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    const before = state.esputnikConnections.length;
+    state.esputnikConnections = state.esputnikConnections.filter((c) => c.account !== account);
+    removed = state.esputnikConnections.length < before;
+    if (account in state.esputnikClients) {
+      const { [account]: _omit, ...rest } = state.esputnikClients;
+      state.esputnikClients = rest;
+    }
+    return state;
+  });
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 // eSputnik OAuth clients — one Dynamic-Client-Registration client per
 // (slug, account) connection, never shared across accounts or people (see

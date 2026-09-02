@@ -23,6 +23,7 @@ import {
 import { enqueueChatMessage, sendTurnWithRetry } from './delivery.js';
 import { beginEsputnikConnect } from './esputnik-oauth.js';
 import {
+  deleteEsputnikCredential,
   deleteMemoryFile,
   deletePersonSkill,
   getSharedSkillNames,
@@ -32,7 +33,7 @@ import {
   removeStickerPack,
 } from './nfs.js';
 import { postControl } from './pod-control.js';
-import { readPersonState, removeCustomEnvVar, removeToolPermission, setCustomEnvVar } from './person-state.js';
+import { readPersonState, removeCustomEnvVar, removeEsputnikConnection, removeToolPermission, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
 import { RESERVED_ENV_NAMES } from './pod-template.js';
 import type { RouterDeps } from './router-deps.js';
@@ -131,6 +132,9 @@ export async function tryHandlePersonCommand(
       return true;
     case '/esputnik_accounts':
       await handleEsputnikAccounts(deps, slug, person);
+      return true;
+    case '/esputnik_disconnect':
+      await handleEsputnikDisconnect(deps, slug, person, args, updateId);
       return true;
     case '/permissions':
       await handleListPermissions(deps, slug, person);
@@ -630,4 +634,54 @@ async function handleEsputnikAccounts(deps: RouterDeps, slug: string, person: Pe
     return `${c.account} — connected since ${c.connectedAt} (${statusText})`;
   });
   await deps.telegram.sendMessage(person.chatId, lines.join('\n'));
+}
+
+/**
+ * Forgets an eSputnik account entirely: the ConfigMap connection record +
+ * registered OAuth client (person-state.ts's `removeEsputnikConnection`)
+ * and the actual token pair on NFS (nfs.ts's `deleteEsputnikCredential`,
+ * the write side's exact counterpart). A pod restart is required after —
+ * unlike /memories or /skills, the MCP server is wired into `Options.mcpServers`
+ * at query-stream start (or added live via `syncMcpServer`, sdk-session.ts),
+ * and there's no live "remove a connected MCP server" call exposed by the
+ * SDK, so the only way to make the running session stop offering
+ * `mcp__esputnik-<account>__...` tools is the same restartToApply
+ * /set_var/unset_var already use.
+ */
+async function handleEsputnikDisconnect(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
+  if (!args[0]) {
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /esputnik_disconnect <account> — see /esputnik_accounts for names.');
+    return;
+  }
+  const parsed = parseEsputnikAccount(args);
+  if ('error' in parsed) {
+    await deps.telegram.sendMessage(person.chatId, parsed.error);
+    return;
+  }
+  const { account } = parsed;
+  const removed = await removeEsputnikConnection(deps.api, deps.cfg.namespace, slug, account);
+  if (!removed) {
+    await deps.telegram.sendMessage(person.chatId, `No such connected account: ${account}. See /esputnik_accounts.`);
+    return;
+  }
+  await deleteEsputnikCredential(slug, esputnikServerKey(account));
+  await deps.telegram.sendMessage(
+    person.chatId,
+    `Disconnected eSputnik account "${account}". Restarting your pod to apply — back in a few seconds.`,
+  );
+  await restartToApply(deps, slug, person);
+  log.line('esputnik_disconnected', { person: slug, account });
+  notifyModel(
+    deps,
+    slug,
+    person,
+    updateId,
+    `The person just ran /esputnik_disconnect on eSputnik account "${account}" — its mcp__esputnik-${account}__... tools are gone. If they ask about that account, it's really disconnected, not still usable; they'd need to run /esputnik_connect ${account} again first.`,
+  );
 }
