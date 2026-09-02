@@ -33,6 +33,7 @@ function normalizePersonState(state: PersonState): PersonState {
     customEnv: state.customEnv ?? {},
     esputnikConnections: state.esputnikConnections ?? [],
     esputnikClients: state.esputnikClients ?? {},
+    toolPermissions: state.toolPermissions ?? {},
   };
 }
 
@@ -250,4 +251,30 @@ export async function upsertEsputnikClient(
     return state;
   });
   return stored;
+}
+
+// ---------------------------------------------------------------------------
+// Tool permissions (Telegram Allow/Deny gate, runner/permission-gate.ts) —
+// only "always allow" grants are ever persisted; "allow once"/"deny" are
+// one-shot and never reach this ConfigMap. Keyed by the exact fully-qualified
+// MCP tool name, never a category (see PersonState.toolPermissions' comment).
+// ---------------------------------------------------------------------------
+
+export async function setToolPermission(api: CoreV1Api, namespace: string, slug: string, toolName: string): Promise<void> {
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    state.toolPermissions = { ...state.toolPermissions, [toolName]: 'always_allow' };
+    return state;
+  });
+}
+
+export async function removeToolPermission(api: CoreV1Api, namespace: string, slug: string, toolName: string): Promise<boolean> {
+  let removed = false;
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    if (!(toolName in state.toolPermissions)) return state;
+    removed = true;
+    const { [toolName]: _omit, ...rest } = state.toolPermissions;
+    state.toolPermissions = rest;
+    return state;
+  });
+  return removed;
 }

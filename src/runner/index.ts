@@ -240,6 +240,9 @@ async function main(): Promise<void> {
           tools: esputnikToolPolicy(),
         });
         response = { ok: true, action: 'sync_esputnik_mcp', mode };
+      } else if (body.action === 'permission_decision') {
+        const { applied, toolName } = controller.resolvePermissionDecision(body.requestId, body.decision);
+        response = { ok: true, action: 'permission_decision', applied, ...(toolName ? { toolName } : {}) };
       } else {
         response = { ok: true, action: 'esputnik_status', servers: await controller.getEsputnikStatus() };
       }

@@ -132,7 +132,16 @@ export type ControlRequest =
    * call itself.
    */
   | { action: 'sync_esputnik_mcp'; serverKey: string }
-  | { action: 'esputnik_status' };
+  | { action: 'esputnik_status' }
+  /**
+   * Delivers a Telegram permission-prompt button tap to the pod that raised
+   * it. `requestId` is never the tool name (Telegram's callback_data has a
+   * 64-byte cap, and a fully-qualified `mcp__esputnik-<account>__<name>` can
+   * run close to that on its own) — only the pod's own PermissionGate knows
+   * which tool a given requestId was for, which is why `applied`/`toolName`
+   * come back in the response instead of being looked up by the caller.
+   */
+  | { action: 'permission_decision'; requestId: string; decision: 'once' | 'always' | 'deny' };
 
 export type ControlResponse =
   | { ok: true; action: 'context'; context: ContextUsageSummary }
@@ -140,6 +149,17 @@ export type ControlResponse =
   | { ok: true; action: 'set_context_limit' }
   | { ok: true; action: 'sync_esputnik_mcp'; mode: 'added' | 'reconnected' }
   | { ok: true; action: 'esputnik_status'; servers: EsputnikServerStatus[] }
+  /**
+   * `applied: false` means the pod had no pending request under this id
+   * (already resolved, timed out, or lost to a pod restart) — the operator
+   * must not treat that as a successful decision (no ConfigMap write, and
+   * the Telegram message should be edited to say the request expired
+   * rather than falsely confirming it). `toolName` is only present when
+   * `applied` is true — it's the pod's own record of what the request was
+   * for, since `requestId` alone (kept short for Telegram's callback_data
+   * limit) never carries it.
+   */
+  | { ok: true; action: 'permission_decision'; applied: boolean; toolName?: string }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
@@ -259,6 +279,18 @@ export interface PersonState {
   customEnv: Record<string, CustomEnvVar>; // keyed by var name
   esputnikConnections: EsputnikConnection[];
   esputnikClients: Record<string, EsputnikOAuthClient>; // keyed by account, same key as EsputnikConnection.account
+  /**
+   * "Always allow" grants from the Telegram permission gate
+   * (runner/permission-gate.ts), keyed by the exact fully-qualified MCP
+   * tool name (e.g. `mcp__esputnik-work__create_email_message`) — one grant
+   * covers exactly that tool, never a category or pattern. Only a positive
+   * grant is ever persisted here; "Allow once" and "Deny" are one-shot and
+   * never write to this map. Read into the pod's env at create/recreate
+   * time (`PERSON_TOOL_PERMISSIONS`, pod-template.ts) so a grant survives a
+   * restart; the running pod's own in-memory copy is what actually gets
+   * consulted turn-to-turn, updated live the moment a decision resolves.
+   */
+  toolPermissions: Record<string, 'always_allow'>;
 }
 
 export function emptyPersonState(displayName: string): PersonState {
@@ -270,6 +302,7 @@ export function emptyPersonState(displayName: string): PersonState {
     customEnv: {},
     esputnikConnections: [],
     esputnikClients: {},
+    toolPermissions: {},
   };
 }
 

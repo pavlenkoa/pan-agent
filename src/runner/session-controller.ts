@@ -24,6 +24,7 @@ import {
   type TurnRequest,
 } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
+import { createPermissionGate, type PermissionDecision } from './permission-gate.js';
 import {
   buildPrompt,
   buildQueryOptions,
@@ -100,6 +101,16 @@ export interface SessionController {
   syncMcpServer(serverKey: string, config: McpServerConfig): Promise<'added' | 'reconnected'>;
   /** Live per-account connection health, filtered to eSputnik servers only. Throws if the session hasn't started yet. */
   getEsputnikStatus(): Promise<EsputnikServerStatus[]>;
+  /**
+   * Resolves a pending Telegram permission-gate request (permission-gate.ts)
+   * once the operator relays a button tap via /control. `applied: false`
+   * means no pending request exists under this id (already resolved, timed
+   * out, or lost to a pod restart) — the operator must not persist an
+   * "always allow" grant or otherwise treat that as a real decision. Safe
+   * to call even if the session hasn't started yet (the gate itself has no
+   * dependency on `queryHandle`).
+   */
+  resolvePermissionDecision(requestId: string, decision: PermissionDecision): { applied: boolean; toolName?: string };
 }
 
 type QueryFn = typeof sdkQuery;
@@ -167,6 +178,12 @@ export function createSessionController(
   // cleared for synthetic pushes (task-notification replies, auto-compact)
   // so the model can't accidentally react to a stale/unrelated message.
   const reactable: ReactableMessageRef = { messageId: null };
+  // Constructed once, reused across every stream (re)start below — its
+  // pending-request map and in-memory always-allowed set must survive a
+  // crash-restart of the query() stream itself (the whole point of tracking
+  // "always allow" in memory at all is to avoid re-prompting within this
+  // pod's lifetime; a stream restart is not a pod restart).
+  const permissionGate = createPermissionGate(cfg);
 
   function isBusy(): boolean {
     return currentJob !== null;
@@ -461,7 +478,7 @@ ${noUpdateInstruction(
         const esputnikServers = await readEsputnikMcpServers(cfg);
         knownEsputnikKeys = new Set(Object.keys(esputnikServers));
         dynamicEsputnikServers.clear();
-        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, esputnikServers) });
+        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, permissionGate, esputnikServers) });
         queryHandle = handle;
         await consumeQuery(handle);
         if (stopped) return;
@@ -536,6 +553,9 @@ ${noUpdateInstruction(
       if (!queryHandle) throw new Error('session not started yet');
       const statuses = await queryHandle.mcpServerStatus();
       return statuses.filter((s) => s.name.startsWith('esputnik-')).map((s) => ({ serverKey: s.name, status: s.status }));
+    },
+    resolvePermissionDecision(requestId: string, decision: PermissionDecision): { applied: boolean; toolName?: string } {
+      return permissionGate.resolve(requestId, decision);
     },
   };
 }

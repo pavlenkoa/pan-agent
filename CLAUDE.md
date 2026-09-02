@@ -187,6 +187,35 @@ stdout to your log backend picks it up like any other pod.
   Verify against the actual installed types, not a general impression of
   what the SDK does — and don't take an agent's claims about SDK behavior at
   face value either; cross-check before relying on it.
+- **The SDK's `PermissionMode: 'auto'` is a model classifier, not a
+  human-in-the-loop gate — checked and deliberately not used for the
+  Telegram permission prompt (`runner/permission-gate.ts`).** Per the
+  installed SDK's own `sdk.d.ts`: `'auto'` "use[s] a model classifier to
+  approve/deny permission prompts" — an LLM decides, which is exactly the
+  "no real gate, just automated discretion" problem this prompt exists to
+  close, just moved to a different automated layer. `setMcpPermissionModeOverride(serverName,
+  'auto'|'default'|null)` is also a dead end here: its own doc comment says
+  the override only takes effect "when the session mode would already
+  auto-allow (bypassPermissions/auto)" — this runner's session-wide
+  `permissionMode` is `'acceptEdits'`, so the override wouldn't engage
+  without first flipping the whole session to a more permissive mode, the
+  opposite direction from what's wanted. Also checked and not reused: the
+  official `claude-plugins-official` Telegram channel plugin already
+  implements an Allow/Deny Telegram prompt, but against
+  `notifications/claude/channel/permission_request`/`.../permission`, a
+  protocol tied to the `claude` CLI's `--channels` flag (`Options.settings.channelsEnabled`
+  plus `--channels plugin:...` server selection) — there's no equivalent
+  field reachable from the SDK's own `query()`/`Options` surface this
+  runner actually uses, so the protocol itself isn't adoptable here (its
+  `InlineKeyboard`/`callback_query`/answer-every-branch/edit-to-lock-in-outcome
+  UI pattern was still worth copying directly). The actual mechanism: a
+  `canUseTool` branch (`isEsputnikWriteTool` in `sdk-session.ts`) pauses on
+  `PermissionGate.request()`, which sends a real Telegram inline-keyboard
+  message and awaits a promise the operator resolves later via `/control`'s
+  `permission_decision` action — routed through the operator specifically
+  because only it ever calls `getUpdates` (every pod shares the same bot
+  token but only the operator polls for updates), so a button tap always
+  lands there first regardless of which pod asked.
 - **Secret hygiene for self-service commands.** `/set_var`/`/unset_var`/
   `/memories`/`/forget_memory` are intercepted by the operator *before* the
   message becomes a turn — a secret value never enters the model's
@@ -396,3 +425,16 @@ all live control-plane operations against the person's already-running
 session, not turns handled by the model. A full security review of
 credential handling, the attachment path allowlist, MCP tool surface, and
 NFS isolation has been done once; not a recurring process yet.
+
+**Telegram permission gate for eSputnik writes** (added 2026-09-02, not yet
+verified live — see the gotcha below): a real Allow-once/Always-allow/Deny
+prompt, since `esputnikToolPolicy()`'s per-server `always_allow` never
+actually gated anything (see "eSputnik OAuth MCP tools" gotcha below) —
+until this, the only thing standing between the model and a real
+`create_email_message`/`send_broadcast`/etc. call was prompt-text
+discipline. `/permissions`/`/forget_permission` give the person visibility
+into and control over standing "always allow" grants, same shape as
+`/skills`/`/forget_skill`. This exists specifically to unblock a planned
+write-capable shared skill (`esputnik-multilang-campaign`, drafted in
+`~/esputnik-multilang-campaign-skill-plan.md` — not yet added) that needed
+a real gate to sit behind before shipping.

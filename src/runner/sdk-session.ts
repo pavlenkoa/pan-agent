@@ -17,6 +17,7 @@ import { ESPUTNIK_SERVER_URL, type ChatMessage, type ContextUsageSummary, type E
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
+import type { PermissionGate } from './permission-gate.js';
 import { buildSchedulingMcpServer } from './scheduling-tools.js';
 import { buildTelegramExtrasMcpServer, type ReactableMessageRef } from './telegram-extras-tools.js';
 
@@ -306,6 +307,46 @@ export function esputnikToolPolicy(): McpServerToolPolicy[] {
   return ESPUTNIK_TOOL_NAMES.map((name) => ({ name, permission_policy: 'always_allow' }));
 }
 
+/**
+ * The subset of `ESPUTNIK_TOOL_NAMES` above that mutates something —
+ * everything except the `get_*`/`list_*` reads and
+ * `prepare_email_message_upload`/`prepare_image_upload` (these two only
+ * mint a signed upload URL; the actual `create_*`/`update_*` call that
+ * follows is what's gated, so an upload step isn't double-prompted). These
+ * are the only eSputnik tool calls routed through the Telegram permission
+ * gate (`permission-gate.ts`) instead of being auto-allowed — reads stay
+ * exactly as frictionless as before. Same "manual refresh if eSputnik adds
+ * tools" caveat as `ESPUTNIK_TOOL_NAMES` itself already documents.
+ */
+const ESPUTNIK_WRITE_TOOL_NAMES = new Set([
+  'attach_group_contacts', 'bulk_upsert_contacts', 'create_app_inbox_message', 'create_email_message',
+  'create_event', 'create_mobile_push_message', 'create_past_events', 'create_sms_message',
+  'delete_app_inbox_message', 'delete_app_inbox_message_translation', 'delete_broadcast', 'delete_contact',
+  'delete_contact_by_external_customer_id', 'delete_email_message', 'delete_email_message_translation',
+  'delete_mobile_push_message', 'delete_mobile_push_message_translation', 'delete_sms_message',
+  'delete_sms_message_translation', 'detach_group_contacts', 'send_broadcast', 'send_email_message',
+  'send_sms_message', 'smart_send_message', 'subscribe_contact', 'update_app_inbox_message',
+  'update_app_inbox_message_translation', 'update_brandkit', 'update_brandkit_patch', 'update_contact',
+  'update_email_message', 'update_email_message_translation', 'update_interaction_status',
+  'update_mobile_push_message', 'update_mobile_push_message_translation', 'update_sms_message',
+  'update_sms_message_translation', 'upload_contacts', 'upload_image', 'upsert_contact',
+]);
+
+/**
+ * `toolName` here is always `mcp__<serverKey>__<bareName>`, and only
+ * `bareName` is a fixed, known dictionary — `serverKey` (`esputnik-<account>`)
+ * carries a person-chosen account label we don't want to parse out. None of
+ * `ESPUTNIK_WRITE_TOOL_NAMES` is a suffix of another, so matching on
+ * `toolName.endsWith('__' + name)` is unambiguous without needing to split
+ * out the account substring at all.
+ */
+export function isEsputnikWriteTool(toolName: string): boolean {
+  for (const name of ESPUTNIK_WRITE_TOOL_NAMES) {
+    if (toolName.endsWith(`__${name}`)) return true;
+  }
+  return false;
+}
+
 /** `esputnik-work` from either `esputnik-work` (this project's own write shape, nfs.ts's writeEsputnikCredential) or a possible SDK-rewritten `esputnik-work|<hash>` — robust to either since it's unconfirmed locally which one the SDK settles on (see CLAUDE.md's "Phase 0 status" note). */
 function serverKeyFromCredentialKey(key: string): string {
   const pipeIdx = key.indexOf('|');
@@ -423,14 +464,28 @@ export const MEMORY_DIR_NAME = 'memory';
  * server key `allowedTools` couldn't have known about at `buildQueryOptions`
  * time. Matching the `mcp__esputnik-` prefix here instead covers both the
  * boot-time and live-added cases uniformly, with no extra plumbing.
+ *
+ * Write-shaped eSputnik calls (`isEsputnikWriteTool`) are the one exception
+ * to "this callback only ever allows or denies, never actually asks
+ * anyone" — those are routed through `gate.request()` (permission-gate.ts),
+ * which pauses on a real Telegram Allow-once/Always-allow/Deny prompt. This
+ * is the actual, only technical gate on an eSputnik write in this codebase
+ * — `esputnikToolPolicy()`'s `always_allow` never even matters, since a
+ * per-server `always_allow` entry doesn't bypass this callback either (see
+ * this function's own doc comment above).
  */
-function buildSkillsCanUseTool(cfg: RunnerConfig): CanUseTool {
+function buildSkillsCanUseTool(cfg: RunnerConfig, gate: PermissionGate): CanUseTool {
   const skillsDir = path.join(cfg.workspaceCwd, '.claude', 'skills');
   const isSkillsPath = (p: string | undefined): boolean =>
     !!p && (path.resolve(p) === skillsDir || path.resolve(p).startsWith(skillsDir + path.sep));
 
   return async (toolName, input, options) => {
     if (toolName.startsWith('mcp__esputnik-')) {
+      if (!isEsputnikWriteTool(toolName)) return { behavior: 'allow', updatedInput: input };
+      const decision = await gate.request(toolName, input);
+      if (decision === 'deny') {
+        return { behavior: 'deny', message: `Permission denied by the person for ${toolName}.` };
+      }
       return { behavior: 'allow', updatedInput: input };
     }
 
@@ -450,6 +505,7 @@ export function buildQueryOptions(
   cfg: RunnerConfig,
   sessionId: string | null,
   reactable: ReactableMessageRef,
+  gate: PermissionGate,
   esputnikServers: Record<string, McpServerConfig> = {},
 ): Options {
   return {
@@ -496,7 +552,7 @@ export function buildQueryOptions(
     // (skills show up in system/init's `skills` list either way) — it's
     // `'Skill'` in `tools` above that actually gates invocation.
     skills: 'all',
-    canUseTool: buildSkillsCanUseTool(cfg),
+    canUseTool: buildSkillsCanUseTool(cfg, gate),
     mcpServers: {
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),

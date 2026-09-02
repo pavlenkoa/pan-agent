@@ -24,7 +24,7 @@ export async function ensurePersonPod(
   if (existing) return;
   await ensurePersonHomeDirs(slug);
   const state = await readPersonState(api, cfg.namespace, slug);
-  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken, state?.customEnv ?? {});
+  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken, state?.customEnv ?? {}, state?.toolPermissions ?? {});
   await createPod(api, cfg.namespace, spec);
   log.line('pod_created', { person: slug });
 }

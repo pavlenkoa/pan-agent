@@ -8,6 +8,7 @@ import { turnKey } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
   buildPrompt,
+  isEsputnikWriteTool,
   NO_UPDATE_MARKER,
   personaChangedSinceLastAck,
   readEsputnikMcpServers,
@@ -346,5 +347,27 @@ describe('readEsputnikMcpServers', () => {
     const config = servers['esputnik-work'] as { tools?: { name: string; permission_policy?: string }[] };
     expect(config.tools?.length).toBeGreaterThan(50);
     expect(config.tools).toContainEqual({ name: 'get_account_info', permission_policy: 'always_allow' });
+  });
+});
+
+describe('isEsputnikWriteTool', () => {
+  it('flags a write-shaped tool regardless of account label', () => {
+    expect(isEsputnikWriteTool('mcp__esputnik-work__create_email_message')).toBe(true);
+    expect(isEsputnikWriteTool('mcp__esputnik-personal__delete_contact')).toBe(true);
+  });
+
+  it('does not flag a read-shaped tool', () => {
+    expect(isEsputnikWriteTool('mcp__esputnik-work__get_account_info')).toBe(false);
+    expect(isEsputnikWriteTool('mcp__esputnik-work__list_email_messages')).toBe(false);
+  });
+
+  it('does not flag the upload-prep tools — the create/update call that follows them is what gets gated', () => {
+    expect(isEsputnikWriteTool('mcp__esputnik-work__prepare_email_message_upload')).toBe(false);
+    expect(isEsputnikWriteTool('mcp__esputnik-work__prepare_image_upload')).toBe(false);
+  });
+
+  it('does not flag an unrelated builtin tool', () => {
+    expect(isEsputnikWriteTool('Bash')).toBe(false);
+    expect(isEsputnikWriteTool('Write')).toBe(false);
   });
 });

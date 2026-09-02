@@ -83,6 +83,8 @@ helm/
 | `/context_limit [tokens]` | Show or set your auto-compact token ceiling (default 250,000; resets on pod restart) |
 | `/compact` | Manually compact your conversation history now |
 | `/clear` | Start a fresh conversation (memory/tasks unaffected) |
+| `/permissions` | List tools you've always-allowed via the Telegram permission prompt |
+| `/forget_permission <toolName>` | Revoke an always-allow permission |
 
 All of the above are intercepted before the message ever reaches the model — the
 Telegram `/` menu is registered per-chat, so an unapproved sender never even sees

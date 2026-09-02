@@ -23,6 +23,17 @@ function parseCustomVarsDoc(raw: string | undefined): CustomVarDoc[] {
   }
 }
 
+/** PERSON_TOOL_PERMISSIONS is a JSON array of tool names already granted `always_allow` (PersonState.toolPermissions' keys, as of pod create/recreate time) — boot-time seed for the runner's in-memory PermissionGate (permission-gate.ts), so a persisted grant survives a restart. */
+function parseToolPermissions(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface RunnerConfig {
   slug: string;
   chatId: number;
@@ -36,6 +47,7 @@ export interface RunnerConfig {
   claudeHome: string;
   sessionIdFile: string;
   customVarsDoc: CustomVarDoc[];
+  toolPermissions: string[];
 }
 
 export function loadRunnerConfig(): RunnerConfig {
@@ -53,5 +65,6 @@ export function loadRunnerConfig(): RunnerConfig {
     claudeHome,
     sessionIdFile: process.env['SESSION_ID_FILE'] ?? `${claudeHome}/pan-agent-session-id`,
     customVarsDoc: parseCustomVarsDoc(process.env['PERSON_CUSTOM_VARS_DOC']),
+    toolPermissions: parseToolPermissions(process.env['PERSON_TOOL_PERMISSIONS']),
   };
 }

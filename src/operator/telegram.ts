@@ -69,9 +69,18 @@ export interface TelegramMessage {
   quote?: TelegramTextQuote;
 }
 
+/** A tap on an inline-keyboard button (permission-gate prompts, currently the only sender of one — see runner/telegram-send.ts's sendPermissionRequest). `message` is the original message the keyboard was attached to, deliberately shallow like TelegramReplyToMessage above. */
+export interface TelegramCallbackQuery {
+  id: string;
+  from: TelegramFrom;
+  message?: { message_id: number; chat: TelegramChat; text?: string };
+  data?: string;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface TelegramApiResponse<T> {
@@ -102,7 +111,7 @@ export class TelegramClient {
     const res = await fetch(this.url('getUpdates'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ offset, timeout: timeoutSeconds, allowed_updates: ['message'] }),
+      body: JSON.stringify({ offset, timeout: timeoutSeconds, allowed_updates: ['message', 'callback_query'] }),
       signal: AbortSignal.timeout((timeoutSeconds + 10) * 1000),
     });
     const data = (await res.json()) as TelegramApiResponse<TelegramUpdate[]>;
@@ -119,6 +128,38 @@ export class TelegramClient {
     });
     const data = (await res.json()) as TelegramApiResponse<unknown>;
     if (!data.ok) throw new Error(`sendMessage failed: ${data.description ?? res.status}`);
+  }
+
+  /** Stops the tap's loading spinner and optionally shows a short toast — must be called for every `callback_query`, even an invalid/unauthorized one, or the button just spins. Never throws: a failure here shouldn't block the actual decision from being relayed. */
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    try {
+      const res = await fetch(this.url('answerCallbackQuery'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQueryId, ...(text ? { text } : {}) }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await res.json()) as TelegramApiResponse<boolean>;
+      if (!data.ok) throw new Error(data.description ?? String(res.status));
+    } catch (err) {
+      log.error('answer_callback_query_failed', err, { callbackQueryId });
+    }
+  }
+
+  /** Used to lock in a permission-gate decision on the original prompt message (drops the keyboard, appends the outcome) so a stale or already-answered button can't be tapped twice. Never throws, same rationale as answerCallbackQuery. */
+  async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
+    try {
+      const res = await fetch(this.url('editMessageText'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await res.json()) as TelegramApiResponse<unknown>;
+      if (!data.ok) throw new Error(data.description ?? String(res.status));
+    } catch (err) {
+      log.error('edit_message_text_failed', err, { chatId, messageId });
+    }
   }
 
   /**

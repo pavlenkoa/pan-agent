@@ -5,7 +5,7 @@
  */
 import type { V1Pod } from '@kubernetes/client-node';
 
-import type { CustomEnvVar } from '../shared/types.js';
+import type { CustomEnvVar, PersonState } from '../shared/types.js';
 import type { OperatorConfig } from './config.js';
 
 export const RUNNER_PORT = 8080;
@@ -20,6 +20,7 @@ export const RESERVED_ENV_NAMES = new Set([
   'PERSON_CHAT_ID',
   'PERSON_TASKS_TOKEN',
   'PERSON_CUSTOM_VARS_DOC',
+  'PERSON_TOOL_PERMISSIONS',
   'TZ',
   'LANG',
   'OPERATOR_TASKS_URL',
@@ -52,6 +53,7 @@ export function buildPersonPodSpec(
   tz: string,
   tasksToken: string,
   customEnv: Record<string, CustomEnvVar> = {},
+  toolPermissions: PersonState['toolPermissions'] = {},
 ): V1Pod {
   const name = podName(slug);
   const peopleHome = `${cfg.nfsRootPath}/people/${slug}`;
@@ -95,6 +97,7 @@ export function buildPersonPodSpec(
             secretEnv('GH_TOKEN', 'pan-agent-github', 'GH_TOKEN'),
             secretEnv('SEEDPOOL_API_KEY', 'pan-agent-seedpool', 'SEEDPOOL_API_KEY'),
             { name: 'PERSON_CUSTOM_VARS_DOC', value: JSON.stringify(customVarsDoc) },
+            { name: 'PERSON_TOOL_PERMISSIONS', value: JSON.stringify(Object.keys(toolPermissions)) },
             ...customEnvEntries.map(([varName, v]) => ({ name: varName, value: v.value })),
           ],
           ports: [{ containerPort: RUNNER_PORT, name: 'http' }],

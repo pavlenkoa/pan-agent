@@ -11,9 +11,11 @@ import { enqueueChatMessage } from './delivery.js';
 import { addStickerPack } from './nfs.js';
 import { findSlugByTelegramUserId, readPeopleIndex, recordPending, touchLastSeen } from './people-index.js';
 import { tryHandlePersonCommand } from './person-commands.js';
+import { setToolPermission } from './person-state.js';
+import { postControl } from './pod-control.js';
 import { provisionPerson, slugifyForPerson, uniqueSlug } from './provisioning.js';
 import type { RouterDeps } from './router-deps.js';
-import type { TelegramMessage, TelegramSticker, TelegramUpdate } from './telegram.js';
+import type { TelegramCallbackQuery, TelegramMessage, TelegramSticker, TelegramUpdate } from './telegram.js';
 
 /** Largest photo size is last in Telegram's array; documents pass through as-is. */
 function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined {
@@ -78,9 +80,71 @@ async function handleIncomingSticker(
   log.line('sticker_pack_added', { person: slug, setName, added });
 }
 
+/**
+ * `callback_data` is `pm:<requestId>:o|a|d` — see runner/telegram-send.ts's
+ * `sendPermissionRequest` for where it's generated and shared/types.ts's
+ * `permission_decision` ControlRequest for why it never carries the tool
+ * name itself (Telegram's 64-byte callback_data cap).
+ */
+const PERMISSION_CALLBACK_RE = /^pm:([a-zA-Z0-9]+):(o|a|d)$/;
+const DECISION_BY_CODE = { o: 'once', a: 'always', d: 'deny' } as const;
+
+/**
+ * Routes a permission-gate button tap to the pod that raised it. Every
+ * pod/operator shares one bot token but only this process ever calls
+ * `getUpdates` (architecture doc's "single getUpdates consumer" deviation),
+ * so a tap always lands here first regardless of which pod sent the
+ * original prompt — resolving `telegramUserId` -> `slug` the same way the
+ * message path below does is what gets it back to the right one.
+ */
+async function routeCallbackQuery(deps: RouterDeps, cq: TelegramCallbackQuery): Promise<void> {
+  const match = PERMISSION_CALLBACK_RE.exec(cq.data ?? '');
+  if (!match) {
+    await deps.telegram.answerCallbackQuery(cq.id);
+    return;
+  }
+  const requestId = match[1] ?? '';
+  const decision = DECISION_BY_CODE[match[2] as 'o' | 'a' | 'd'];
+
+  const idx = await readPeopleIndex(deps.api, deps.cfg.namespace);
+  const slug = findSlugByTelegramUserId(idx, cq.from.id);
+  if (!slug) {
+    await deps.telegram.answerCallbackQuery(cq.id, 'Not authorized.');
+    return;
+  }
+
+  const result = await postControl(deps.api, deps.cfg, slug, { action: 'permission_decision', requestId, decision });
+  const resolved = result?.ok === true && result.action === 'permission_decision' ? result : null;
+  const applied = resolved?.applied ?? false;
+  const toolName = resolved?.toolName;
+
+  if (!applied) {
+    await deps.telegram.answerCallbackQuery(cq.id, 'Request expired or already handled.');
+  } else {
+    if (decision === 'always' && toolName) {
+      await setToolPermission(deps.api, deps.cfg.namespace, slug, toolName);
+    }
+    const label = decision === 'once' ? '✅ Allowed once' : decision === 'always' ? '⭐ Always allowed' : '❌ Denied';
+    await deps.telegram.answerCallbackQuery(cq.id, label);
+  }
+
+  const original = cq.message;
+  if (original?.text) {
+    const suffix = applied ? (decision === 'once' ? '✅ Allowed once' : decision === 'always' ? '⭐ Always allowed' : '❌ Denied') : '⚠️ Expired or already handled';
+    await deps.telegram.editMessageText(original.chat.id, original.message_id, `${original.text}\n\n${suffix}`);
+  }
+
+  log.line('permission_decision_routed', { person: slug, requestId, decision, applied });
+}
+
 export type { RouterDeps } from './router-deps.js';
 
 export async function routeUpdate(deps: RouterDeps, update: TelegramUpdate): Promise<void> {
+  if (update.callback_query) {
+    await routeCallbackQuery(deps, update.callback_query);
+    return;
+  }
+
   const msg = update.message;
   if (!msg || !msg.from || msg.chat.type !== 'private') return; // DM-only, non-message updates dropped (v1)
 

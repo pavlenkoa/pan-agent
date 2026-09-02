@@ -73,6 +73,45 @@ export async function sendTelegramReply(token: string, chatId: number, text: str
   }
 }
 
+/**
+ * The Telegram side of the permission gate (runner/permission-gate.ts): a
+ * plain-text message (no `parse_mode` — the tool `input` preview can
+ * contain arbitrary characters, e.g. raw email HTML for an eSputnik call,
+ * that would need careful escaping under HTML parse mode) with an inline
+ * keyboard. `callback_data` deliberately carries only `requestId` + a
+ * one-letter decision code, never the tool name — see shared/types.ts's
+ * `permission_decision` ControlRequest doc comment for why. Not chunked
+ * like `sendTelegramReply`: the caller already bounds `inputPreview`'s
+ * length, and a multi-message split would only attach the buttons to one
+ * of the parts.
+ */
+export async function sendPermissionRequest(
+  token: string,
+  chatId: number,
+  requestId: string,
+  toolLabel: string,
+  inputPreview: string,
+): Promise<void> {
+  const text = `🔐 Permission request\n\nTool: ${toolLabel}\nInput:\n${inputPreview}`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '✅ Allow once', callback_data: `pm:${requestId}:o` },
+        { text: '⭐ Always allow', callback_data: `pm:${requestId}:a` },
+        { text: '❌ Deny', callback_data: `pm:${requestId}:d` },
+      ],
+    ],
+  };
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, reply_markup }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const result = (await res.json()) as SendResult;
+  if (!result.ok) throw new Error(`sendMessage (permission request) failed: ${result.description ?? 'unknown'}`);
+}
+
 // Telegram's own cap on bot-uploaded files (multipart, not a local Bot API server).
 export const TELEGRAM_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 

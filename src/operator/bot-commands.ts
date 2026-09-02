@@ -41,6 +41,8 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'clear', description: 'Start a fresh conversation (memory/tasks are unaffected)' },
   { command: 'esputnik_connect', description: 'Connect (or reconnect) your own eSputnik account: <account>' },
   { command: 'esputnik_accounts', description: 'List your connected eSputnik accounts and their status' },
+  { command: 'permissions', description: 'List tools you\'ve always-allowed via the permission prompt' },
+  { command: 'forget_permission', description: 'Revoke an always-allow permission by tool name (see /permissions)' },
 ];
 
 /** The admin is also a tenant (router.ts) — their chat gets both lists. */

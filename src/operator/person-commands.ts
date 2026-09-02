@@ -32,7 +32,7 @@ import {
   removeStickerPack,
 } from './nfs.js';
 import { postControl } from './pod-control.js';
-import { readPersonState, removeCustomEnvVar, setCustomEnvVar } from './person-state.js';
+import { readPersonState, removeCustomEnvVar, removeToolPermission, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
 import { RESERVED_ENV_NAMES } from './pod-template.js';
 import type { RouterDeps } from './router-deps.js';
@@ -131,6 +131,12 @@ export async function tryHandlePersonCommand(
       return true;
     case '/esputnik_accounts':
       await handleEsputnikAccounts(deps, slug, person);
+      return true;
+    case '/permissions':
+      await handleListPermissions(deps, slug, person);
+      return true;
+    case '/forget_permission':
+      await handleForgetPermission(deps, slug, person, args);
       return true;
     default:
       return false;
@@ -308,6 +314,40 @@ async function handleForgetSkill(
       `The person just ran /forget_skill on ${name} — that skill's SKILL.md is gone. If they ask about it, or if you still see a stale reference to it in your own memory notes, it's really deleted, not still there.`,
     );
   }
+}
+
+/**
+ * /permissions and /forget_permission manage the Telegram permission gate's
+ * persisted "always allow" grants (runner/permission-gate.ts,
+ * shared/types.ts's PersonState.toolPermissions) — the ConfigMap-side
+ * companion to the live Allow-once/Always-allow/Deny buttons themselves
+ * (router.ts's routeCallbackQuery). Revoking here doesn't need to reach an
+ * already-running pod live: the pod's own in-memory always-allowed set only
+ * ever grows via a real button tap, so a revoked grant simply isn't
+ * re-seeded on its *next* restart — no restart is forced from here.
+ */
+async function handleListPermissions(deps: RouterDeps, slug: string, person: PersonIndexEntry): Promise<void> {
+  const state = await readPersonState(deps.api, deps.cfg.namespace, slug);
+  const entries = Object.keys(state?.toolPermissions ?? {});
+  if (entries.length === 0) {
+    await deps.telegram.sendMessage(person.chatId, 'No standing "always allow" permissions.');
+    return;
+  }
+  await deps.telegram.sendMessage(person.chatId, entries.join('\n'));
+}
+
+async function handleForgetPermission(deps: RouterDeps, slug: string, person: PersonIndexEntry, args: string[]): Promise<void> {
+  const [toolName] = args;
+  if (!toolName) {
+    await deps.telegram.sendMessage(person.chatId, 'Usage: /forget_permission <toolName> — see /permissions for names.');
+    return;
+  }
+  const removed = await removeToolPermission(deps.api, deps.cfg.namespace, slug, toolName);
+  await deps.telegram.sendMessage(
+    person.chatId,
+    removed ? `Revoked always-allow for ${toolName}. Takes effect on your pod's next restart.` : `No such permission: ${toolName}`,
+  );
+  if (removed) log.line('tool_permission_forgotten', { person: slug, toolName });
 }
 
 /**

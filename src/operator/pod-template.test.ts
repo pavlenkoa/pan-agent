@@ -56,8 +56,20 @@ describe('buildPersonPodSpec — custom env vars', () => {
   });
 
   it('RESERVED_ENV_NAMES covers every literal name already used in the pod spec', () => {
-    for (const name of ['PERSON_SLUG', 'PERSON_CHAT_ID', 'PERSON_TASKS_TOKEN', 'TZ', 'LANG', 'GH_TOKEN']) {
+    for (const name of ['PERSON_SLUG', 'PERSON_CHAT_ID', 'PERSON_TASKS_TOKEN', 'PERSON_TOOL_PERMISSIONS', 'TZ', 'LANG', 'GH_TOKEN']) {
       expect(RESERVED_ENV_NAMES.has(name)).toBe(true);
     }
+  });
+});
+
+describe('buildPersonPodSpec — tool permissions', () => {
+  it('seeds PERSON_TOOL_PERMISSIONS with the granted tool names only, never the grant value', () => {
+    const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token', {}, { 'mcp__esputnik-work__create_email_message': 'always_allow' });
+    expect(JSON.parse(envMap(pod).get('PERSON_TOOL_PERMISSIONS') as string)).toEqual(['mcp__esputnik-work__create_email_message']);
+  });
+
+  it('produces an empty array when no permissions have been granted', () => {
+    const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(JSON.parse(envMap(pod).get('PERSON_TOOL_PERMISSIONS') as string)).toEqual([]);
   });
 });
