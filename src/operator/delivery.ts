@@ -96,11 +96,27 @@ interface PersonQueue {
 const queues = new Map<string, PersonQueue>();
 
 /**
- * Enqueue a chat message for a person and flush. While a flush is already
- * in flight for that person, new messages just join the queue; each retry
- * inside flush() re-snapshots the whole queue, so anything that arrived
- * during a backoff wait rides along on the next attempt instead of
+ * Enqueue a chat message for a person and kick off a flush. While a flush is
+ * already in flight for that person, new messages just join the queue; each
+ * retry inside flush() re-snapshots the whole queue, so anything that
+ * arrived during a backoff wait rides along on the next attempt instead of
  * spawning its own turn.
+ *
+ * Always resolves once the message is queued and flush() has been started —
+ * NEVER once delivery actually succeeds. `flush()` can legitimately retry
+ * for up to 10 minutes (a person's pod being busy mid-turn is the normal
+ * steady state, not a failure), and this is awaited by `router.ts` inside
+ * `pollUpdates`'s single global per-update loop (telegram.ts) — the only
+ * process consuming this bot's Telegram updates. Confirmed live 2026-09-02:
+ * this used to `return flush(...)` directly on the first message for a
+ * given person, which really did block that entire global loop for the
+ * whole retry duration — and since a Telegram button tap is itself just
+ * another update in that same queue, a person's OWN tap on the permission
+ * prompt that would free up their busy pod could get stuck behind their own
+ * earlier message's stuck retry, deadlocking the whole bot for everyone
+ * until an operator manually resolved the pending permission decision
+ * out-of-band. `flush()`'s own internal errors are caught here now that
+ * nothing upstream awaits it to surface them.
  */
 export function enqueueChatMessage(
   api: CoreV1Api,
@@ -115,8 +131,10 @@ export function enqueueChatMessage(
   const q = queues.get(slug) ?? { busy: false, queued: [] };
   queues.set(slug, q);
   q.queued.push({ updateId, message });
-  if (q.busy) return Promise.resolve();
-  return flush(api, cfg, slug, chatId, tz, tasksToken);
+  if (!q.busy) {
+    void flush(api, cfg, slug, chatId, tz, tasksToken).catch((err) => log.error('chat_flush_failed', err, { person: slug }));
+  }
+  return Promise.resolve();
 }
 
 async function flush(

@@ -188,6 +188,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// This is the ONLY consumer of this bot's Telegram updates — every person's
+// messages AND every button tap, for everyone, funnel through this one
+// sequential loop (architecture doc's "single getUpdates consumer"
+// deviation). `onUpdate` is expected to resolve quickly (router.ts's
+// enqueueChatMessage now only awaits queuing a delivery, never the delivery
+// itself succeeding — see its own doc comment for the incident that fixed
+// that), but this bound is defense-in-depth against anything else upstream
+// that might one day await something slow (an unbounded k8s API call, a
+// dependency with no timeout of its own, etc.): confirmed live 2026-09-02
+// that a single stuck update can freeze this whole loop for EVERY person,
+// including — worst case — a person's own button tap that would resolve the
+// exact permission request their busy pod is blocked on, deadlocking until
+// someone manually intervenes outside Telegram entirely. A timed-out
+// `onUpdate` isn't cancelled (there's no general way to abort an arbitrary
+// in-flight async operation), just no longer awaited — whatever it kicked
+// off keeps running in the background on its own error handling.
+const UPDATE_HANDLING_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`update handling exceeded ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err as Error);
+      },
+    );
+  });
+}
+
 /**
  * Long-poll loop. `onUpdate` is *expected* to resolve (never reject) once
  * the update has either been durably handed off (runner 202'd) or
@@ -200,13 +234,17 @@ function sleep(ms: number): Promise<void> {
  * differs in shape since `main()` would exit and rely on k8s to restart the
  * pod, but a poison update would then just crash-loop forever on itself
  * since no offset is ever persisted across restarts; catching it here
- * avoids that class of failure entirely).
+ * avoids that class of failure entirely). `UPDATE_HANDLING_TIMEOUT_MS`
+ * covers the same class of risk for a *hang* (never resolving) rather than
+ * a *rejection* — a plain try/catch does nothing for a promise that just
+ * never settles.
  */
 export async function pollUpdates(
   client: TelegramClient,
   startOffset: number | undefined,
   onUpdate: (update: TelegramUpdate) => Promise<void>,
   signal: AbortSignal,
+  updateTimeoutMs = UPDATE_HANDLING_TIMEOUT_MS,
 ): Promise<void> {
   let offset = startOffset;
   while (!signal.aborted) {
@@ -222,7 +260,7 @@ export async function pollUpdates(
     for (const update of updates) {
       log.line('update_received', { updateId: update.update_id });
       try {
-        await onUpdate(update);
+        await withTimeout(onUpdate(update), updateTimeoutMs);
       } catch (err) {
         log.error('update_handling_failed', err, { updateId: update.update_id });
       }
