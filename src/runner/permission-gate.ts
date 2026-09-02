@@ -44,15 +44,67 @@ function generateRequestId(): string {
 }
 
 const INPUT_PREVIEW_MAX_LEN = 3000;
+const VALUE_MAX_LEN = 300;
 
-function previewInput(input: Record<string, unknown>): string {
-  let json: string;
-  try {
-    json = JSON.stringify(input, null, 2);
-  } catch {
-    json = String(input);
+function truncate(s: string, maxLen: number): string {
+  return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+}
+
+function formatScalar(v: unknown): string {
+  if (v === null) return 'null';
+  if (v === undefined) return '(unset)';
+  if (typeof v === 'string') return truncate(v, VALUE_MAX_LEN);
+  if (Array.isArray(v)) {
+    if (v.length === 0) return '(empty)';
+    return v.map((x) => (x && typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ');
   }
-  return json.length > INPUT_PREVIEW_MAX_LEN ? `${json.slice(0, INPUT_PREVIEW_MAX_LEN)}…` : json;
+  return String(v);
+}
+
+/**
+ * Flattens a tool-input object into readable "key: value" lines instead of
+ * raw JSON — a person approving/denying a call needs to see what's actually
+ * changing, not `{`/`}`/quoting noise. Nested wrapper objects (eSputnik's
+ * common `{payload: {...}}` shape, but this isn't hardcoded to that one key
+ * — any nested object flattens the same way) use just the leaf key name
+ * rather than a dotted path: these payloads are shallow enough in practice
+ * that a path prefix would add noise without disambiguating anything real.
+ *
+ * `uploadSessionId` gets special-cased: it's an opaque reference to content
+ * already uploaded in an earlier, ungated step (`prepare_email_message_upload`
+ * + a plain `curl PUT`, confirmed live neither of which is a gated write
+ * tool) — by the time this permission check fires, the actual content is
+ * already gone from view. Showing the raw token would look like something
+ * inspectable when it isn't; the honest thing is to say so explicitly
+ * rather than let a person think the JSON is just terse.
+ */
+function flattenForDisplay(value: unknown, lines: string[]): void {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'uploadSessionId' && typeof v === 'string') {
+        lines.push(`content: already uploaded (${truncate(v, 16)}), not shown here`);
+        continue;
+      }
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        flattenForDisplay(v, lines);
+      } else {
+        lines.push(`${key}: ${formatScalar(v)}`);
+      }
+    }
+    return;
+  }
+  lines.push(formatScalar(value));
+}
+
+export function formatInputPreview(input: Record<string, unknown>): string {
+  const lines: string[] = [];
+  try {
+    flattenForDisplay(input, lines);
+  } catch {
+    lines.push(String(input));
+  }
+  if (lines.length === 0) lines.push('(no arguments)');
+  return truncate(lines.join('\n'), INPUT_PREVIEW_MAX_LEN);
 }
 
 export function createPermissionGate(cfg: RunnerConfig, timeoutMs = PERMISSION_TIMEOUT_MS): PermissionGate {
@@ -75,7 +127,7 @@ export function createPermissionGate(cfg: RunnerConfig, timeoutMs = PERMISSION_T
       }, timeoutMs);
       pending.set(requestId, { toolName, timer, resolve: resolvePromise });
 
-      void sendPermissionRequest(cfg.telegramBotToken, cfg.chatId, requestId, toolName, previewInput(input)).catch((err) => {
+      void sendPermissionRequest(cfg.telegramBotToken, cfg.chatId, requestId, toolName, formatInputPreview(input)).catch((err) => {
         // Left pending — a send failure isn't distinguishable here from "sent
         // but not yet tapped," and the timeout above already fails closed.
         log.error('permission_request_send_failed', err, { person: cfg.slug, requestId, toolName });

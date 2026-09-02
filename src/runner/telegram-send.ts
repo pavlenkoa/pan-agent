@@ -4,7 +4,7 @@
  * reply.
  */
 import { log } from '../shared/log.js';
-import { markdownToTelegramHtml } from './telegram-format.js';
+import { escapeHtml, markdownToTelegramHtml } from './telegram-format.js';
 
 const TELEGRAM_MAX_LEN = 4000;
 
@@ -74,11 +74,51 @@ export async function sendTelegramReply(token: string, chatId: number, text: str
 }
 
 /**
- * The Telegram side of the permission gate (runner/permission-gate.ts): a
- * plain-text message (no `parse_mode` — the tool `input` preview can
- * contain arbitrary characters, e.g. raw email HTML for an eSputnik call,
- * that would need careful escaping under HTML parse mode) with an inline
- * keyboard. `callback_data` deliberately carries only `requestId` + a
+ * `mcp__esputnik-<account>__<bareName>` -> `eSputnik (<account>): <bareName>`
+ * for display. Splits on the *last* `__` — safe in practice because no real
+ * eSputnik tool name contains a double underscore (confirmed against the
+ * full `ESPUTNIK_TOOL_NAMES` list in sdk-session.ts) and account labels are
+ * person-chosen short words (`ESPUTNIK_ACCOUNT_RE` in person-commands.ts).
+ * Falls back to the raw name for anything that doesn't match the expected
+ * shape rather than guessing wrong.
+ */
+function formatToolLabel(toolName: string): string {
+  const sep = toolName.lastIndexOf('__');
+  if (sep <= 0) return toolName;
+  const prefix = toolName.slice(0, sep);
+  const bareName = toolName.slice(sep + 2);
+  const account = prefix.startsWith('mcp__esputnik-') ? prefix.slice('mcp__esputnik-'.length) : null;
+  return account ? `eSputnik (${account}): ${bareName}` : toolName;
+}
+
+async function postPermissionMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  reply_markup: unknown,
+  parseMode?: 'HTML',
+): Promise<SendResult> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, reply_markup, ...(parseMode ? { parse_mode: parseMode } : {}) }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  return (await res.json()) as SendResult;
+}
+
+/**
+ * The Telegram side of the permission gate (runner/permission-gate.ts).
+ * `inputPreview`'s raw JSON (which can itself contain arbitrary characters
+ * — e.g. real email HTML for an eSputnik `create_email_message` payload,
+ * confirmed live to include literal `<p>...</p>`) goes inside an
+ * HTML-escaped `<pre>` block instead of being dumped as unescaped plain
+ * text, so it actually renders as a readable, monospaced block instead of
+ * a hard-to-parse wall of text — same `withHtmlFallback` shape as every
+ * other send in this file: try HTML first, fall back to the unescaped
+ * plain-text version (still with the same buttons) if Telegram rejects it
+ * as malformed, so a formatting bug degrades instead of losing the prompt
+ * outright. `callback_data` deliberately carries only `requestId` + a
  * one-letter decision code, never the tool name — see shared/types.ts's
  * `permission_decision` ControlRequest doc comment for why. Not chunked
  * like `sendTelegramReply`: the caller already bounds `inputPreview`'s
@@ -89,10 +129,10 @@ export async function sendPermissionRequest(
   token: string,
   chatId: number,
   requestId: string,
-  toolLabel: string,
+  toolName: string,
   inputPreview: string,
 ): Promise<void> {
-  const text = `🔐 Permission request\n\nTool: ${toolLabel}\nInput:\n${inputPreview}`;
+  const label = formatToolLabel(toolName);
   const reply_markup = {
     inline_keyboard: [
       [
@@ -102,14 +142,13 @@ export async function sendPermissionRequest(
       ],
     ],
   };
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, reply_markup }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const result = (await res.json()) as SendResult;
-  if (!result.ok) throw new Error(`sendMessage (permission request) failed: ${result.description ?? 'unknown'}`);
+  const htmlText = `🔐 <b>Permission request</b>\n\n<b>Tool:</b> ${escapeHtml(label)}\n<b>Input:</b>\n<pre>${escapeHtml(inputPreview)}</pre>`;
+  const htmlResult = await postPermissionMessage(token, chatId, htmlText, reply_markup, 'HTML');
+  if (htmlResult.ok) return;
+  log.error('telegram_html_send_failed', new Error(htmlResult.description ?? 'unknown'), { chatId, method: 'sendMessage (permission request)' });
+  const plainText = `🔐 Permission request\n\nTool: ${label}\nInput:\n${inputPreview}`;
+  const plainResult = await postPermissionMessage(token, chatId, plainText, reply_markup);
+  if (!plainResult.ok) throw new Error(`sendMessage (permission request) failed: ${plainResult.description ?? 'unknown'}`);
 }
 
 // Telegram's own cap on bot-uploaded files (multipart, not a local Bot API server).

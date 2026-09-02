@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { RunnerConfig } from './config.js';
-import { createPermissionGate } from './permission-gate.js';
+import { createPermissionGate, formatInputPreview } from './permission-gate.js';
 
 vi.mock('./telegram-send.js', () => ({
   sendPermissionRequest: vi.fn().mockResolvedValue(undefined),
@@ -102,5 +102,46 @@ describe('createPermissionGate', () => {
     expect(await pending).toBe('deny'); // timed out first
 
     expect(gate.resolve(requestId!, 'always')).toEqual({ applied: false });
+  });
+});
+
+describe('formatInputPreview', () => {
+  it('flattens a nested payload wrapper into plain key: value lines, no braces or quotes', () => {
+    const preview = formatInputPreview({
+      payload: { name: 'Test SMS', from: 'marketing', text: 'Third test message' },
+    });
+    expect(preview).toBe('name: Test SMS\nfrom: marketing\ntext: Third test message');
+  });
+
+  it('flattens a flat (non-wrapped) input the same way', () => {
+    expect(formatInputPreview({ message_id: '4667476' })).toBe('message_id: 4667476');
+  });
+
+  it('replaces uploadSessionId with an explanatory note instead of the raw opaque token', () => {
+    const preview = formatInputPreview({
+      payload: { uploadSessionId: 'upl_pZMDYM1uUKvVBMPYFFom-ZiU', name: 'yaaaay!' },
+    });
+    expect(preview).toContain('content: already uploaded (upl_pZMDYM1uUKvV…), not shown here');
+    expect(preview).not.toContain('upl_pZMDYM1uUKvVBMPYFFom-ZiU'); // full token never shown
+    expect(preview).toContain('name: yaaaay!');
+  });
+
+  it('renders null/undefined/empty-array values explicitly rather than dropping them silently', () => {
+    const preview = formatInputPreview({ a: null, b: undefined, c: [] });
+    expect(preview).toBe('a: null\nb: (unset)\nc: (empty)');
+  });
+
+  it('joins a primitive array inline rather than flattening it into separate lines', () => {
+    expect(formatInputPreview({ tags: ['a', 'b', 'c'] })).toBe('tags: a, b, c');
+  });
+
+  it('truncates a very long string value rather than dumping the whole thing', () => {
+    const preview = formatInputPreview({ body: 'x'.repeat(1000) });
+    expect(preview.length).toBeLessThan(1000);
+    expect(preview).toContain('…');
+  });
+
+  it('falls back to "(no arguments)" for an empty input object', () => {
+    expect(formatInputPreview({})).toBe('(no arguments)');
   });
 });
