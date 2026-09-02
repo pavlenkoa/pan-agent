@@ -35,6 +35,47 @@ export interface PermissionGate {
   resolve(requestId: string, decision: PermissionDecision): { applied: boolean; toolName?: string };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Same capped-backoff shape as session-controller.ts's RESTART_BACKOFFS_MS /
+// operator/delivery.ts's backoffMs — short and bounded (worst case ~3s added
+// latency), not a substitute for the 10-minute timeout above. Exists because
+// of a confirmed live incident (2026-09-02): a single transient `fetch`
+// failure sending the Telegram prompt left a request silently pending with
+// nothing ever shown to the person, indistinguishable from "sent but not
+// tapped yet" — they had no way to know anything was waiting on them until
+// the full timeout elapsed. A couple of quick retries turns "one blip = 10
+// minutes of silence" into "one blip = invisible." A constructor parameter
+// on `createPermissionGate` (not a bare module constant) for the same
+// reason `timeoutMs` already is — real timers only in this file's tests
+// (per session-controller.test.ts's own note on why: advanceTimersByTimeAsync
+// interacts badly with promise-chain-heavy code here), so tests shrink this
+// instead of faking wall-clock time.
+export const SEND_RETRY_DELAYS_MS = [1000, 2000];
+
+async function sendWithRetries(
+  send: () => Promise<void>,
+  evt: string,
+  fields: Record<string, unknown>,
+  retryDelaysMs: number[],
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await send();
+      return;
+    } catch (err) {
+      const delay = retryDelaysMs[attempt];
+      if (delay === undefined) {
+        log.error(evt, err, fields);
+        return;
+      }
+      await sleep(delay);
+    }
+  }
+}
+
 function generateRequestId(): string {
   // 12 hex chars — short enough to stay well under Telegram's 64-byte
   // callback_data cap alongside the "pm:" prefix and decision suffix, plenty
@@ -107,7 +148,11 @@ export function formatInputPreview(input: Record<string, unknown>): string {
   return truncate(lines.join('\n'), INPUT_PREVIEW_MAX_LEN);
 }
 
-export function createPermissionGate(cfg: RunnerConfig, timeoutMs = PERMISSION_TIMEOUT_MS): PermissionGate {
+export function createPermissionGate(
+  cfg: RunnerConfig,
+  timeoutMs = PERMISSION_TIMEOUT_MS,
+  retryDelaysMs = SEND_RETRY_DELAYS_MS,
+): PermissionGate {
   const alwaysAllowed = new Set(cfg.toolPermissions);
   const pending = new Map<string, PendingRequest>();
 
@@ -119,19 +164,29 @@ export function createPermissionGate(cfg: RunnerConfig, timeoutMs = PERMISSION_T
       const timer = setTimeout(() => {
         pending.delete(requestId);
         resolvePromise('deny');
-        void sendTelegramReply(
-          cfg.telegramBotToken,
-          cfg.chatId,
-          `⏱ No response to the permission request for ${toolName} in time — treated as denied.`,
-        ).catch((err) => log.error('permission_timeout_notice_failed', err, { person: cfg.slug, requestId, toolName }));
+        void sendWithRetries(
+          () =>
+            sendTelegramReply(
+              cfg.telegramBotToken,
+              cfg.chatId,
+              `⏱ No response to the permission request for ${toolName} in time — treated as denied.`,
+            ),
+          'permission_timeout_notice_failed',
+          { person: cfg.slug, requestId, toolName },
+          retryDelaysMs,
+        );
       }, timeoutMs);
       pending.set(requestId, { toolName, timer, resolve: resolvePromise });
 
-      void sendPermissionRequest(cfg.telegramBotToken, cfg.chatId, requestId, toolName, formatInputPreview(input)).catch((err) => {
-        // Left pending — a send failure isn't distinguishable here from "sent
-        // but not yet tapped," and the timeout above already fails closed.
-        log.error('permission_request_send_failed', err, { person: cfg.slug, requestId, toolName });
-      });
+      // Left pending either way — a send failure (even after retries) isn't
+      // distinguishable here from "sent but not yet tapped," and the timeout
+      // above already fails closed.
+      void sendWithRetries(
+        () => sendPermissionRequest(cfg.telegramBotToken, cfg.chatId, requestId, toolName, formatInputPreview(input)),
+        'permission_request_send_failed',
+        { person: cfg.slug, requestId, toolName },
+        retryDelaysMs,
+      );
     });
 
     if (decision === 'always') alwaysAllowed.add(toolName);

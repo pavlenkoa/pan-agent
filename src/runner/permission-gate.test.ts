@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RunnerConfig } from './config.js';
-import { createPermissionGate, formatInputPreview } from './permission-gate.js';
+import { createPermissionGate, formatInputPreview, PERMISSION_TIMEOUT_MS } from './permission-gate.js';
 
 vi.mock('./telegram-send.js', () => ({
   sendPermissionRequest: vi.fn().mockResolvedValue(undefined),
@@ -143,5 +143,46 @@ describe('formatInputPreview', () => {
 
   it('falls back to "(no arguments)" for an empty input object', () => {
     expect(formatInputPreview({})).toBe('(no arguments)');
+  });
+});
+
+describe('createPermissionGate — send retries (2026-09-02 incident: a single failed fetch left a request silently pending)', () => {
+  // Real timers, not fake ones — same reasoning as session-controller.test.ts:
+  // advanceTimersByTimeAsync's interaction with promise-chain-heavy code here
+  // is finicky, so tests shrink the actual delays instead of faking wall-clock
+  // time. `retryDelaysMs` is a constructor parameter for exactly this reason.
+  const shortRetryDelays = [5, 5];
+
+  // A previous test earlier in this file may leave stray calls in these
+  // mocks' history (they're only ever cleared at the *start* of each of
+  // this file's other tests, not the end) — reset before, not just after.
+  beforeEach(async () => {
+    const { sendPermissionRequest, sendTelegramReply } = await import('./telegram-send.js');
+    vi.mocked(sendPermissionRequest).mockReset().mockResolvedValue(undefined);
+    vi.mocked(sendTelegramReply).mockReset().mockResolvedValue(undefined);
+  });
+
+  it('retries a failed send and succeeds on the second attempt', async () => {
+    const gate = createPermissionGate(fakeConfig(), PERMISSION_TIMEOUT_MS, shortRetryDelays);
+    const { sendPermissionRequest } = await import('./telegram-send.js');
+    vi.mocked(sendPermissionRequest).mockRejectedValueOnce(new Error('fetch failed')).mockResolvedValueOnce(undefined);
+
+    const pending = gate.request('mcp__esputnik-work__create_email_message', {});
+    await new Promise((r) => setTimeout(r, 30)); // both attempts have had time to run
+
+    expect(sendPermissionRequest).toHaveBeenCalledTimes(2);
+    const requestId = vi.mocked(sendPermissionRequest).mock.calls[1]?.[2];
+    expect(gate.resolve(requestId!, 'once')).toEqual({ applied: true, toolName: 'mcp__esputnik-work__create_email_message' });
+    expect(await pending).toBe('once');
+  });
+
+  it('gives up after exhausting retries but the request stays pending — the overall timeout still fails it closed', async () => {
+    const gate = createPermissionGate(fakeConfig(), 40, shortRetryDelays);
+    const { sendPermissionRequest } = await import('./telegram-send.js');
+    vi.mocked(sendPermissionRequest).mockRejectedValue(new Error('fetch failed'));
+
+    const pending = gate.request('mcp__esputnik-work__create_email_message', {});
+    expect(await pending).toBe('deny'); // overall timeout fires after both retries are exhausted
+    expect(sendPermissionRequest).toHaveBeenCalledTimes(3); // 1 initial + 2 retries, all failed
   });
 });
