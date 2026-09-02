@@ -234,6 +234,23 @@ export function esputnikServerKey(account: string): string {
 
 export const ESPUTNIK_SERVER_URL = 'https://mcp.esputnik.com';
 
+/**
+ * One OAuth client this deployment registered with eSputnik via Dynamic
+ * Client Registration, scoped to exactly one (person, account) connection —
+ * never shared across people, or across two accounts of the same person.
+ * Deliberately narrow: a shared client_id across concurrent authorizations
+ * is the one axis this system's own OAuth flow can control, and is the
+ * suspected cause of eSputnik's authorization server conflating two
+ * unrelated accounts' tokens when both authorized under the same global
+ * client_id in overlapping windows (cross-tenant incident, 2026-09-02).
+ */
+export interface EsputnikOAuthClient {
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  registeredAt: string; // ISO 8601
+}
+
 export interface PersonState {
   version: 1;
   profile: PersonProfile;
@@ -241,6 +258,7 @@ export interface PersonState {
   runtime: PersonRuntime;
   customEnv: Record<string, CustomEnvVar>; // keyed by var name
   esputnikConnections: EsputnikConnection[];
+  esputnikClients: Record<string, EsputnikOAuthClient>; // keyed by account, same key as EsputnikConnection.account
 }
 
 export function emptyPersonState(displayName: string): PersonState {
@@ -251,6 +269,7 @@ export function emptyPersonState(displayName: string): PersonState {
     runtime: { lastDeliveredUpdateId: null },
     customEnv: {},
     esputnikConnections: [],
+    esputnikClients: {},
   };
 }
 

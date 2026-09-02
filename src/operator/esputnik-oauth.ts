@@ -12,28 +12,18 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { CoreV1Api } from '@kubernetes/client-node';
 
 import { log } from '../shared/log.js';
-import { ESPUTNIK_SERVER_URL, type ChatMessage } from '../shared/types.js';
+import { ESPUTNIK_SERVER_URL, type ChatMessage, type EsputnikOAuthClient } from '../shared/types.js';
 import type { OperatorConfig } from './config.js';
 import { enqueueChatMessage } from './delivery.js';
-import { createJsonConfigMap, isConflict, readJsonConfigMap } from './k8s.js';
 import { writeEsputnikCredential, type EsputnikTokenSet } from './nfs.js';
 import { readPeopleIndex } from './people-index.js';
 import { postControl } from './pod-control.js';
-import { upsertEsputnikConnection } from './person-state.js';
+import { readEsputnikClient, upsertEsputnikClient, upsertEsputnikConnection } from './person-state.js';
 
 const REDIRECT_PATH = '/oauth/esputnik/callback';
 const ESPUTNIK_ISSUER = 'https://mcp.esputnik.com/';
 const ESPUTNIK_SCOPE = 'esputnik.api';
-const CLIENT_CONFIGMAP_NAME = 'pan-agent-esputnik-oauth-client';
-const CLIENT_DATA_KEY = 'client.json';
 const PENDING_TTL_MS = 10 * 60_000;
-
-interface OAuthClientConfig {
-  clientId: string;
-  clientSecret?: string;
-  redirectUri: string;
-  registeredAt: string;
-}
 
 interface PendingConnect {
   slug: string;
@@ -61,16 +51,30 @@ function redirectUriFor(cfg: OperatorConfig): string {
 }
 
 /**
- * Registers this deployment's OAuth client once via Dynamic Client
- * Registration and caches it in a small ConfigMap — a client identity, not a
- * per-person credential, safe to keep at the operator level (design doc's
- * framing). `token_endpoint_auth_method: 'none'` since the design doc's own
- * live test found the token endpoint accepts a refresh without a client
- * secret — this client is effectively public/PKCE-only.
+ * Registers a dedicated OAuth client via Dynamic Client Registration for
+ * this exact (person, account) connection and caches it in that person's own
+ * state ConfigMap — deliberately NOT shared across people or across two
+ * accounts of the same person. This used to be one global client reused by
+ * every connection; that shared client_id is the suspected root cause of a
+ * live cross-tenant incident (2026-09-02, see CLAUDE.md) where eSputnik's
+ * own authorization server appears to have conflated two unrelated
+ * accounts' tokens after both authorized under the same client_id in
+ * overlapping windows. Scoping the client per-person alone isn't enough
+ * either — one person can hold multiple distinct eSputnik accounts, which
+ * would still share a client_id under that scheme — so this is scoped to
+ * the same (slug, account) granularity `serverKey` already uses for token
+ * storage. `token_endpoint_auth_method: 'none'` since a live test found the
+ * token endpoint accepts a refresh without a client secret — this client is
+ * effectively public/PKCE-only.
  */
-async function getOrRegisterClient(api: CoreV1Api, cfg: OperatorConfig): Promise<OAuthClientConfig> {
-  const existing = await readJsonConfigMap<OAuthClientConfig>(api, cfg.namespace, CLIENT_CONFIGMAP_NAME, CLIENT_DATA_KEY);
-  if (existing) return existing.value;
+async function getOrRegisterClient(
+  api: CoreV1Api,
+  cfg: OperatorConfig,
+  slug: string,
+  account: string,
+): Promise<EsputnikOAuthClient> {
+  const existing = await readEsputnikClient(api, cfg.namespace, slug, account);
+  if (existing) return existing;
 
   const redirectUri = redirectUriFor(cfg);
   const res = await fetch(`${ESPUTNIK_SERVER_URL}/register`, {
@@ -85,22 +89,13 @@ async function getOrRegisterClient(api: CoreV1Api, cfg: OperatorConfig): Promise
   });
   if (!res.ok) throw new Error(`eSputnik client registration failed: ${res.status}`);
   const body = (await res.json()) as { client_id: string; client_secret?: string };
-  const config: OAuthClientConfig = {
+  const config: EsputnikOAuthClient = {
     clientId: body.client_id,
     ...(body.client_secret ? { clientSecret: body.client_secret } : {}),
     redirectUri,
     registeredAt: new Date().toISOString(),
   };
-  try {
-    await createJsonConfigMap(api, cfg.namespace, CLIENT_CONFIGMAP_NAME, CLIENT_DATA_KEY, config);
-  } catch (err) {
-    if (!isConflict(err)) throw err;
-    // Lost a create race against another operator instance/restart — the other write won, use it.
-    const raced = await readJsonConfigMap<OAuthClientConfig>(api, cfg.namespace, CLIENT_CONFIGMAP_NAME, CLIENT_DATA_KEY);
-    if (raced) return raced.value;
-    throw err;
-  }
-  return config;
+  return upsertEsputnikClient(api, cfg.namespace, slug, account, config);
 }
 
 function generatePkce(): { verifier: string; challenge: string } {
@@ -118,9 +113,9 @@ export async function beginEsputnikConnect(
   serverKey: string,
 ): Promise<{ url: string } | { error: string }> {
   sweepExpired();
-  let client: OAuthClientConfig;
+  let client: EsputnikOAuthClient;
   try {
-    client = await getOrRegisterClient(api, cfg);
+    client = await getOrRegisterClient(api, cfg, slug, account);
   } catch (err) {
     log.error('esputnik_client_registration_failed', err, { person: slug });
     return { error: 'could not register with eSputnik right now — try again shortly.' };
@@ -148,7 +143,7 @@ interface EsputnikTokenResponse {
   scope?: string;
 }
 
-async function exchangeCode(client: OAuthClientConfig, code: string, codeVerifier: string): Promise<EsputnikTokenResponse> {
+async function exchangeCode(client: EsputnikOAuthClient, code: string, codeVerifier: string): Promise<EsputnikTokenResponse> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -229,9 +224,9 @@ export async function handleCallback(api: CoreV1Api, cfg: OperatorConfig, query:
   }
   pending.delete(stateParam); // single-use
 
-  let client: OAuthClientConfig;
+  let client: EsputnikOAuthClient;
   try {
-    client = await getOrRegisterClient(api, cfg);
+    client = await getOrRegisterClient(api, cfg, entry.slug, entry.account);
   } catch (err) {
     log.error('esputnik_callback_client_lookup_failed', err, { person: entry.slug });
     return { ok: false, message: 'Something went wrong — try /esputnik_connect again in Telegram.' };

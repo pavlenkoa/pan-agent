@@ -10,6 +10,7 @@ import {
   emptyPersonState,
   type CustomEnvVar,
   type EsputnikConnection,
+  type EsputnikOAuthClient,
   type PersonState,
   type TaskRecord,
 } from '../shared/types.js';
@@ -27,7 +28,12 @@ function personLabels(slug: string): Record<string, string> {
 
 /** Backfills fields added after a person's state ConfigMap was first created (e.g. customEnv, esputnikConnections). */
 function normalizePersonState(state: PersonState): PersonState {
-  return { ...state, customEnv: state.customEnv ?? {}, esputnikConnections: state.esputnikConnections ?? [] };
+  return {
+    ...state,
+    customEnv: state.customEnv ?? {},
+    esputnikConnections: state.esputnikConnections ?? [],
+    esputnikClients: state.esputnikClients ?? {},
+  };
 }
 
 export async function ensurePersonState(
@@ -210,4 +216,38 @@ export async function upsertEsputnikConnection(
     return state;
   });
   return entry;
+}
+
+// ---------------------------------------------------------------------------
+// eSputnik OAuth clients — one Dynamic-Client-Registration client per
+// (slug, account) connection, never shared across accounts or people (see
+// CLAUDE.md's eSputnik OAuth client-isolation note for why a shared
+// client_id is unsafe). Storage mirrors upsertEsputnikConnection above.
+// ---------------------------------------------------------------------------
+
+export async function readEsputnikClient(
+  api: CoreV1Api,
+  namespace: string,
+  slug: string,
+  account: string,
+): Promise<EsputnikOAuthClient | null> {
+  const state = await readPersonState(api, namespace, slug);
+  return state?.esputnikClients[account] ?? null;
+}
+
+/** Converges concurrent registrations for the same (slug, account) on whichever was persisted first, rather than letting a later racer's write clobber it — so two near-simultaneous /esputnik_connect calls for the same account always end up pointing at the identical client_id. */
+export async function upsertEsputnikClient(
+  api: CoreV1Api,
+  namespace: string,
+  slug: string,
+  account: string,
+  client: EsputnikOAuthClient,
+): Promise<EsputnikOAuthClient> {
+  let stored!: EsputnikOAuthClient;
+  await mutatePersonState(api, namespace, slug, slug, (state) => {
+    stored = state.esputnikClients[account] ?? client;
+    state.esputnikClients = { ...state.esputnikClients, [account]: stored };
+    return state;
+  });
+  return stored;
 }
