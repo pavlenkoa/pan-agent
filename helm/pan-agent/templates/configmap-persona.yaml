@@ -915,7 +915,7 @@ data:
   SKILL-esputnik-multilang-campaign.md: |
     ---
     name: esputnik-multilang-campaign
-    description: Builds translated per-country variants of an existing eSputnik marketing email — resolving each locale's real language code, product names, footer text, and local pricing/stock from that market's own storefront rather than translating the source freehand — then saves them as reviewed drafts, never sent automatically. Use whenever the person asks to translate/localize an eSputnik campaign, or build a country-specific version of an existing message.
+    description: Builds translated per-country variants of an existing eSputnik marketing email — resolving each locale's real language code, sender, product names, footer text and its synced-module id, nav/UI labels, and local pricing/stock from that market's own storefront rather than translating the source freehand — then saves them as reviewed drafts, never sent automatically. Use whenever the person asks to translate/localize an eSputnik campaign, or build a country-specific version of an existing message.
     ---
 
     # eSputnik multi-language campaign drafting
@@ -981,11 +981,20 @@ data:
       - Target message id and the resolved language(s) being built.
       - The country → eSputnik-language-code table for this run (see the gotcha
         below — this needs a human to eyeball it, not just a self-assertion).
-      - The exact sender string(s) to be used, per `list_email_interfaces`.
+      - The exact sender string(s) to be used, per `list_email_interfaces` —
+        and if the target message's own current `from` is something unexpected
+        (a staging/dev sender inherited from whatever it was cloned from, e.g.
+        confirmed live 2026-09-03: `"Ksisters Staging" <staging@ksbs.eu>` sitting
+        on a message named like a real trigger email), say so explicitly in the
+        plan rather than silently inheriting it — see the sender gotcha below.
       - The resolved product name **per locale**, pulled from that locale's own
         storefront — never a translation of the source name (see below).
       - Any price/stock substitutions (formatted the way the real site shows
         them) or content-block removals.
+      - Any other per-locale text with no CSV/source coverage (e.g. a header
+        nav's category labels) and where it's being resolved from — see
+        "Resolving nav/category labels" below; never silently translate these
+        freehand without saying so in the plan first.
     - **On any stock/pricing ambiguity found mid-run** (a variant out of stock
       somewhere, unclear whether a sibling sku is an acceptable swap): stop
       immediately, present the concrete options (swap to a sibling sku / link to
@@ -1058,6 +1067,77 @@ data:
     real sender strings from `list_email_interfaces` for whichever account is
     connected, never assume this exact format applies elsewhere.
 
+    **Verify `from` after every write, don't trust inheritance.**
+    `update_email_message_translation` autofills `from` from whatever the
+    *base* message currently has if the payload omits it (the response's
+    `verification.autofilledFields` says so when it happens) — confirmed live
+    2026-09-03 this silently propagated a stale/staging sender
+    (`"Ksisters Staging" <staging@ksbs.eu>`) into every new translation on a
+    message that looked production-ready otherwise. Always pass an explicit
+    `from` in the payload, resolved per locale the same way the domain/sender
+    table above is resolved, and re-check it in the post-write
+    `get_email_message_export` readback (`from` is a plain field on both the
+    base and each translation's own JSON export) — a 200 response proves the
+    write landed, not that the sender is the one you meant.
+
+    ## Building a full per-locale translation: resolve merge tags and
+    ## per-country conditionals to literal values, don't keep them dynamic
+
+    A message's *base* language is often built to be genuinely multi-market —
+    its own HTML can carry personalization merge tags (`%PERSONAL.DOMAIN|%`,
+    `%PERSONAL.SENDER|%`) and even inline Velocity conditionals
+    (`<!-- #if($data.get('PERSONAL.DOMAIN')=='ksisters.lt') -->...<!-- #elseif(...) -->...<!-- #end -->`)
+    that pick the right country's content at send time for whichever contact
+    receives that base variant. **A translation is not that** — it is already
+    scoped to one specific locale by definition, so the correct move is to
+    resolve every one of these down to that locale's literal value, not carry
+    the dynamic mechanism forward into a message that will only ever render
+    for one market anyway.
+
+    Confirmed live 2026-09-03 building 11 locales of a Ksisters trigger email:
+    copying the base's raw HTML into each translation and leaving
+    `%PERSONAL.DOMAIN|%` and the Velocity blocks untouched (only editing the
+    surrounding *text*) produced translations whose links still pointed at a
+    merge tag rather than a real domain, and whose social-icon row still
+    listed *every* country's Instagram/Facebook rather than just that locale's
+    own — technically correct at send time (the mechanism would have resolved
+    fine per-recipient), but not what a human-built reference translation on
+    the same account actually did, and not what the account owner wanted to
+    review before sending. The already-correct human-built reference
+    translation on that message had already resolved both of these to literal
+    per-locale values — that's the pattern to match, confirmed by inspecting
+    it before assuming otherwise.
+
+    - **Merge tags** (`%PERSONAL.DOMAIN|%` etc.): a plain string replace on
+      the serialized HTML for `%PERSONAL.DOMAIN|%` → `ksisters.<tld>` is safe
+      here specifically because the merge-tag syntax (`%...|%`) never
+      collides with the separate Velocity `$data.get(...)` syntax used below
+      — confirm that's still true before reusing this shortcut on a
+      differently-built template, and prefer `data-href-cid`-targeted
+      `set_attr` calls (via `edit_message_html.py`) wherever a specific link
+      needs a different literal domain than a blanket replace would give it.
+    - **Velocity `#if/#elseif` per-country blocks** (seen wrapping repeated
+      per-country `<a>`/`<img>` elements, e.g. one social-icon `<td>` per
+      network): each branch's content is real HTML sitting between two
+      comment markers, not inside them — so a naive DOM read
+      (`soup.find_all("a")`) returns *every* country's link, all real
+      elements, with the Velocity comments as inert siblings. Resolve by:
+      locating the block's `<td>` via any one known `data-href-cid` inside it
+      (stable across every locale-clone of the base, since they all start
+      from the same base HTML), finding the one child `<a>` whose `href`
+      matches the target locale's real URL, extracting just that element,
+      clearing the `<td>`, and appending only the extracted element back —
+      leaving no Velocity comments or other countries' branches behind. A
+      shared/unconditional element sitting alongside a resolved block (e.g. a
+      single brand-wide TikTok icon with no per-country branches at all) is
+      left completely untouched — resolving is only for genuinely
+      conditional blocks.
+    - Once resolved, re-verify the finished translation's `<a href>` list has
+      exactly one link per social network/nav item, all pointing at that
+      locale's real domain, and contains zero remaining `%...%`/`$data.get`
+      occurrences — a stray one either means a merge tag was missed or a
+      Velocity block was only half-resolved.
+
     ## Content-editing principles: DOM targeting, never text substitution
 
     eSputnik/Stripo exports tag almost every translatable text node, image, and
@@ -1121,6 +1201,48 @@ data:
     to stderr whenever this path is taken — don't skip that check because the
     web/Gmail preview looks fine.
 
+    **A field with an internal `<br>` or a nested `<a>` can't use plain
+    `set_text`/`el.string = ...` — that flattens the whole element to one text
+    node and silently deletes the inner tags.** Confirmed live 2026-09-03 on
+    two real fields on the same template: the body paragraph renders as one
+    sentence, a real `<br><br>`, then a signature line, all inside a single
+    `<p data-cid="...">` — `el.string = translated_text` would collapse that
+    to one unbroken block with no line break. The footer's unsubscribe
+    sentence is worse: the "click here"-equivalent text is a real nested
+    `<a href="https://esputnik.com/unsubscribe">` inside the paragraph, and
+    `el.string = ...` would delete that link entirely, not just its text.
+    Fix, in order of preference:
+    - If the source text has a clear multi-segment shape (e.g. CSV rows
+      separated by blank lines: greeting / body / signature), split on that
+      structure, clear the element's children, and rebuild them explicitly —
+      one `NavigableString` per segment joined by real `soup.new_tag("br")`
+      elements, never a literal `\n` (browsers collapse raw newlines; only an
+      actual `<br>` tag renders as a line break).
+    - For a field whose correct localized version already exists as a whole
+      (e.g. the harvested footer paragraph from another message/locale — see
+      below), replace the *element's children*, not its string: clear it,
+      parse the known-good HTML fragment, and re-parent its nodes into the
+      target element — this preserves whatever inline tags (like the
+      unsubscribe `<a>`) that fragment already has correctly placed, without
+      hand-reconstructing them.
+    - Never regenerate an inline link's markup by hand from translated text
+      alone — always source it from a real place (the harvested fragment, or
+      the original element's own existing `<a>` before your edit) so the
+      `href`/`target`/inline `style` attributes carry over exactly.
+
+    **Menu/nav label casing should match the base design's own convention,
+    not whatever casing the source you resolved the label from happens to
+    use.** Confirmed live 2026-09-03: a base template's top nav rendered in
+    caps (`SKINCARE`, `HAIR & BODY`, `MAKEUP`), but each locale's real
+    storefront `<h1>` (see "Resolving nav/category labels" below) is normal
+    title case (e.g. Estonian `Nahahooldus`) — copying that casing verbatim
+    read as visually inconsistent with the rest of the design once built.
+    Uppercase (or otherwise re-case) the resolved text to match the
+    surrounding design's own convention as the last step before writing it,
+    not as an afterthought only caught by the person reviewing the output —
+    check the base's actual rendered casing for every label field, don't
+    assume every field in a template shares one convention.
+
     ## Upload/write mechanics
 
     - `prepare_email_message_upload(operation, message_id?, language?)` returns a
@@ -1149,7 +1271,15 @@ data:
       `create_email_message`, not inside `payload`, and isn't accepted at all on
       `update_email_message` (fixed at create time).
     - `update_email_message_translation(message_id, language, payload)` — prefer
-      `uploadSessionId` over the older inline `html` field. **Self-verify by
+      `uploadSessionId` over the older inline `html` field. **`payload.subject`
+      is required** — confirmed live 2026-09-03: omitting it (even when the
+      translation already had a subject from a prior write) fails with
+      `400 "Subject must be set"`, not a silent default. Always pass it, even
+      on a re-write of a translation that already exists — read the locale's
+      correct subject from the source (CSV, or the existing translation's own
+      export) rather than guessing. Pass `payload.from` explicitly too, every
+      time — see the sender-verification gotcha above; don't rely on
+      autofill even though the call succeeds without it. **Self-verify by
       reading the message back after every write** (`get_email_message_export`)
       — the endpoint can answer 2xx for a write that didn't actually apply. The
       very first variant added to a message has a known read-back race
@@ -1177,19 +1307,19 @@ data:
     `et,en,fi,sv,nl,lv,lt,da,fr,de`, one locale per named module) — a starting
     point for that specific account, not a universal reference:
 
-    | Locale | "About" menu | "Contact" menu | Unsubscribe link text |
-    |---|---|---|---|
-    | uk | ПРО КОМПАНІЮ | КОНТАКТИ | натисни тут |
-    | et | ETTEVÕTTE KOHTA | KONTAKTID | klõpsa siia |
-    | en | ABOUT THE COMPANY | CONTACTS | click here |
-    | fi | YHTIÖSTÄ | YHTEYSTIEDOT | tähän |
-    | sv | OM OSS | KONTAKTA OSS | klicka här |
-    | nl | OVER ONS BEDRIJF | CONTACT OPNEMEN | hier |
-    | lv | PAR UZŅĒMUMU | KONTAKTI | noklikšķiniet šeit |
-    | lt | APIE ĮMONĘ | KONTAKTAI | spauskite čia |
-    | da | OM VIRKSOMHEDEN | KONTAKTPERSONER | her |
-    | fr (BE) | À PROPOS DE L'ENTREPRISE | CONTACTS | clique ici |
-    | de (BE) | ÜBER UNS | KONTAKTE | klicke hier |
+    | Locale | "About" menu | "Contact" menu | Unsubscribe link text | Block ID |
+    |---|---|---|---|---|
+    | uk | ПРО КОМПАНІЮ | КОНТАКТИ | натисни тут | 98178 |
+    | et | ETTEVÕTTE KOHTA | KONTAKTID | klõpsa siia | 98170 |
+    | en | ABOUT THE COMPANY | CONTACTS | click here | 98164 |
+    | fi | YHTIÖSTÄ | YHTEYSTIEDOT | tähän | 98172 |
+    | sv | OM OSS | KONTAKTA OSS | klicka här | 98180 |
+    | nl | OVER ONS BEDRIJF | CONTACT OPNEMEN | hier | 98185 |
+    | lv | PAR UZŅĒMUMU | KONTAKTI | noklikšķiniet šeit | 98176 |
+    | lt | APIE ĮMONĘ | KONTAKTAI | spauskite čia | 98174 |
+    | da | OM VIRKSOMHEDEN | KONTAKTPERSONER | her | 98168 |
+    | fr (BE) | À PROPOS DE L'ENTREPRISE | CONTACTS | clique ici | 98183 |
+    | de (BE) | ÜBER UNS | KONTAKTE | klicke hier | 98181 |
 
     (This is a quick-reference identity check, not the complete text to copy —
     read the full unsubscribe sentence and every other footer field from message
@@ -1205,6 +1335,74 @@ data:
     module already inserted, export each translation, and build the same table
     fresh. Re-harvest periodically for this account too if its modules change —
     there's no live freshness check possible, only a fresh harvest.
+
+    **The Block ID column above is not decorative — writing the right footer
+    text alone is not enough.** Confirmed live 2026-09-03: the footer's
+    outermost `<td>` in the raw HTML carries
+    `class="esd-stripe esd-synchronizable-module" esd-custom-block-id="98164"`
+    (98164 = the *English* module). Copying the base HTML into a translation
+    and only editing the `data-cid`-tagged text inside that `<td>` leaves this
+    attribute untouched, still pointing at 98164 — so the eSputnik visual
+    editor treats that translation's footer as synced to the **English**
+    module regardless of what text is actually inside it (this is exactly the
+    same saved-blocks-library mechanism described above, just exposed as a
+    literal attribute in the HTML — it's how the `esd-custom-block-id` per
+    locale was harvested for the table above in the first place, by reading
+    this same attribute off each of message 4666580's own translations). Fix:
+    after populating the footer's text, find the element with class
+    `esd-synchronizable-module` (`soup.find("td", class_="esd-synchronizable-module")`
+    — there is exactly one per message/translation) and set its
+    `esd-custom-block-id` attribute to that locale's real id from the table
+    above, before uploading. A stray unrelated `esd-custom-block-id` attribute
+    can also appear elsewhere in the template on a `<td class="esd-stripe">`
+    with **no** `esd-synchronizable-module` class alongside it — that one is
+    inert (not treated as synced), don't touch it; only the element that
+    actually carries the `esd-synchronizable-module` class needs its id
+    corrected.
+
+    ## Resolving nav/category labels (or any other per-locale storefront UI
+    ## text with no CSV/footer-table coverage) directly from the real site
+
+    A template can carry text that's neither in the translation source (CSV,
+    brief, etc.) nor in the harvested footer-module table — e.g. a header nav
+    with category links (`SKINCARE` / `HAIR & BODY` / `MAKEUP`). **Never
+    translate this freehand** — same principle as product names above, and
+    for the same reason: a freehand translation of a generic word can easily
+    diverge from what that market's own site actually calls it. Resolve it
+    from the real storefront instead, using the same "plain `requests` with a
+    browser User-Agent" technique as `price_lookup.py` (direct `WebFetch` on
+    `ksisters.*` gets bot-blocked; plain `requests`/`curl` doesn't — see
+    below):
+
+    - Fetch each locale's real category page (`https://ksisters.<tld>/category/<slug>`,
+      the same slug already present in the source template's own nav
+      `href`s) and read its `<h1>` (and/or `<title>`) — confirmed live
+      2026-09-03 this reliably carries the real per-locale category name
+      (e.g. Estonian `Nahahooldus`, Latvian `Sejas Kopšana`), matched exactly
+      against every target locale's own domain from the domains.json table.
+      Use BeautifulSoup's actual `find("h1")`, not a regex over raw HTML — a
+      page can contain other, unrelated `<h1>`-shaped strings (confirmed live:
+      a filter-widget label embedded in a JS config blob matched a naive
+      `<h1.*?>` regex before the real page `<h1>` did).
+    - **A bilingual storefront (like `ksisters.be`) can serve a different
+      language at the bare domain vs. a language-prefixed path.** Confirmed
+      live 2026-09-03: bare `https://ksisters.be/category/skincare` serves
+      French content (matching the account's `BE NEW (fr)` module being the
+      default), while `https://ksisters.be/de/category/skincare` serves the
+      real German content needed for the account's separate `BE NEW (de)`
+      module — a `/nl/` prefix also resolves but wasn't needed here. Don't
+      assume a bilingual domain only has one path shape; try the obvious
+      language-prefix pattern before falling back to translating freehand.
+    - This is the same fetch/parse *technique* `price_lookup.py` already uses
+      for product pages, generalized to any per-locale storefront text — reuse
+      the plain-`requests`-with-browser-UA approach and per-country domain
+      list from `domains.json`, don't reinvent it, but this specific
+      HTML-scraping-for-a-label pattern isn't tied to that script's product/sku
+      logic and doesn't need it.
+    - Report the resolved per-locale table in the confirmation-gate plan (see
+      above) before writing anything, same as the product-name/price table —
+      this is exactly the kind of content decision that needs a human
+      sanity-check before 11 emails get built on it.
 
     ## Price/stock lookup and per-locale product name — one call answers both
 
@@ -1681,12 +1879,12 @@ data:
     }
     ```
 
-    ### `esputnik-scripts/edit_message_html.py` (v1)
+    ### `esputnik-scripts/edit_message_html.py` (v3)
 
     ```python
     #!/usr/bin/env python3
     """
-    esputnik-multilang-campaign DOM editor. v2
+    esputnik-multilang-campaign DOM editor. v3
 
     Applies data-cid/data-alt-cid/data-title-cid/data-href-cid-targeted edits to
     an eSputnik/Stripo email export, and removes whole content blocks (or, for a
@@ -1694,15 +1892,54 @@ data:
     innermost row alone. Never does text substitution on serialized HTML --
     always parses first.
 
+    v3 (2026-09-03) adds four operations, all confirmed needed live building 11
+    real translations of a Ksisters trigger email on top of v2's plain
+    set_text/set_attr/remove_blocks:
+      - set_segments / set_html: plain set_text (`el.string = ...`) silently
+        DELETES any inner tags a field already has -- a real <br><br> between
+        a sentence and a signature line, or a nested <a> inside a footer
+        unsubscribe sentence -- collapsing everything to one flat text node.
+        Confirmed live: both shapes exist on the same real template.
+      - resolve_conditional: eSputnik/Velocity per-country blocks
+        (<!-- #if($data.get('PERSONAL.DOMAIN')=='ksisters.lt') -->...<!-- #elseif(...) -->...<!-- #end -->,
+        seen wrapping a whole country's worth of repeated <a>/<img> elements,
+        e.g. one social-icon network per country) are NOT one element with
+        alternates inside it -- every branch is real, live HTML sitting
+        between inert comment markers, so a naive read returns every
+        country's version simultaneously. A single-locale translation should
+        collapse this to just the one matching branch, not carry the whole
+        multi-country mechanism into a message that will only ever render for
+        one market. Confirmed live 2026-09-03.
+      - sync_module_id: an eSputnik saved-blocks-library ("module") element
+        carries class="esd-synchronizable-module" plus a literal
+        esd-custom-block-id="<id>" attribute -- copying a base message's HTML
+        into a translation and only editing the *text* inside that element
+        leaves the id pointing at the base's own module (typically the
+        English one) regardless of what the text now says, so the eSputnik
+        editor still treats it as synced to the wrong locale's module.
+        Confirmed live 2026-09-03 on the footer.
+
     Usage:
       python3 edit_message_html.py <input.html> --list-cids
       python3 edit_message_html.py <input.html> <edits.json> <output.html>
 
-    edits.json shape:
+    edits.json shape (every top-level key optional):
     {
       "set_text":     {"<cid>": "new text", ...},
       "set_attr":     {"<cid>": {"alt": "...", "title": "...", "href": "..."}, ...},
-      "remove_blocks": ["<cid>", ...]
+      "remove_blocks": ["<cid>", ...],
+      "set_segments": {
+        "<cid>": {
+          "segments": ["First sentence.", "Second, signature-ish line."],
+          "internal_breaks": {"1": ["Line one of the signature", "Line two"]}
+        }
+      },
+      "set_html": {"<cid>": "<a href=\"...\">click here</a>."},
+      "resolve_conditional": [
+        {"marker_cid": "<cid of one element inside the block>",
+         "target_href": "https://exact-target-url", "parent_tag": "td"}
+      ],
+      "sync_module_id": "98170"
     }
 
     A "<cid>" is matched against data-cid, data-alt-cid, data-title-cid, and
@@ -1714,6 +1951,44 @@ data:
     retarget the link at another locale's storefront (e.g. the per-variant `url`
     the price/stock lookup script already returns), never string-replace the
     domain in the raw HTML.
+
+    set_segments: rebuilds a field's children as segments joined by a real
+    <br><br> (never a literal "\\n" -- browsers collapse raw newlines, only an
+    actual <br> tag renders a line break). Use this for source text with a
+    clear multi-part shape (e.g. a CSV cell that's greeting / body / signature
+    separated by blank lines) where you're composing the final text yourself.
+    "internal_breaks" is optional: a mapping of segment index (as a string) to
+    a list of sub-lines joined by a single <br> within just that segment (e.g.
+    a two-line signature).
+
+    set_html: replaces a field's children with a parsed HTML fragment wholesale
+    -- use this instead of set_segments when the correct, fully-formed localized
+    version of the field already exists somewhere (e.g. a footer paragraph
+    harvested verbatim from another message/locale, unsubscribe link and all)
+    rather than being composed from scratch. Never hand-reconstruct an inline
+    link's markup from translated text alone -- source the fragment from a real
+    place so href/target/inline style attributes carry over exactly.
+
+    resolve_conditional: finds "marker_cid" the same way as everything else
+    (typically a data-href-cid on any one branch inside the block -- stable
+    across every locale-clone of the same base HTML), walks up to its nearest
+    ancestor <parent_tag> (default "td"), finds the one child <a> whose href
+    exactly equals "target_href", extracts just that element, clears the
+    container, and re-appends only the extracted element -- dropping every
+    other country's branch and the Velocity comment markers, leaving no
+    "%...%"/"$data.get" residue behind. An unconditional/shared element sitting
+    alongside a resolved block (e.g. one brand-wide icon with no per-country
+    branches at all) should be left alone -- only pass cids for genuinely
+    conditional blocks.
+
+    sync_module_id: finds the (normally singular) element carrying class
+    "esd-synchronizable-module" and sets its esd-custom-block-id attribute --
+    do this for every translation once its text is populated, using that
+    locale's real module id (harvested the same way as the footer-text table
+    itself -- see the skill's footer section). A stray esd-custom-block-id
+    attribute can appear elsewhere in a template WITHOUT the
+    esd-synchronizable-module class alongside it -- that one is inert, this
+    operation correctly ignores it since it only matches by the class.
 
     remove_blocks: locates the block by cid, walks up to the nearest ancestor
     <td class="esd-structure"> (not just the immediate <tr>, which would leave
@@ -1739,7 +2014,7 @@ data:
     import json
     import sys
 
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, NavigableString
 
     CID_ATTRS = ("data-cid", "data-alt-cid", "data-title-cid", "data-href-cid")
 
@@ -1775,6 +2050,65 @@ data:
             raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
         for k, v in attrs.items():
             el[k] = v
+
+
+    def set_segments(soup, cid, segments, internal_breaks=None):
+        el, attr = find_by_cid(soup, cid)
+        if el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
+        internal_breaks = internal_breaks or {}
+        el.clear()
+        for i, seg in enumerate(segments):
+            if i > 0:
+                el.append(soup.new_tag("br"))
+                el.append(soup.new_tag("br"))
+            lines = internal_breaks.get(str(i))
+            if lines:
+                for j, line in enumerate(lines):
+                    if j > 0:
+                        el.append(soup.new_tag("br"))
+                    el.append(NavigableString(line))
+            else:
+                el.append(NavigableString(seg))
+
+
+    def set_html_fragment(soup, cid, html_fragment):
+        el, attr = find_by_cid(soup, cid)
+        if el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {cid!r}")
+        el.clear()
+        frag = BeautifulSoup(html_fragment, "html.parser")
+        for child in list(frag.contents):
+            el.append(child)
+
+
+    def resolve_conditional_block(soup, marker_cid, target_href, parent_tag="td"):
+        marker_el, attr = find_by_cid(soup, marker_cid)
+        if marker_el is None:
+            raise KeyError(f"no element with any of {CID_ATTRS} == {marker_cid!r}")
+        container = marker_el.find_parent(parent_tag)
+        if container is None:
+            raise ValueError(f"cid {marker_cid!r} has no ancestor <{parent_tag}>")
+        target = None
+        for a in container.find_all("a"):
+            if a.get("href") == target_href:
+                target = a
+                break
+        if target is None:
+            raise ValueError(
+                f"no <a href={target_href!r}> found inside the <{parent_tag}> "
+                f"containing cid {marker_cid!r} -- check the exact target URL"
+            )
+        target.extract()
+        container.clear()
+        container.append(target)
+
+
+    def set_sync_module_id(soup, block_id):
+        el = soup.find(class_="esd-synchronizable-module")
+        if el is None:
+            raise ValueError("no element with class 'esd-synchronizable-module' found")
+        el["esd-custom-block-id"] = str(block_id)
 
 
     def remove_block(soup, cid):
@@ -1857,6 +2191,16 @@ data:
             set_text(soup, cid, text)
         for cid, attrs in edits.get("set_attr", {}).items():
             set_attrs(soup, cid, attrs)
+        for cid, spec in edits.get("set_segments", {}).items():
+            set_segments(soup, cid, spec["segments"], spec.get("internal_breaks"))
+        for cid, html_fragment in edits.get("set_html", {}).items():
+            set_html_fragment(soup, cid, html_fragment)
+        for spec in edits.get("resolve_conditional", []):
+            resolve_conditional_block(
+                soup, spec["marker_cid"], spec["target_href"], spec.get("parent_tag", "td")
+            )
+        if "sync_module_id" in edits:
+            set_sync_module_id(soup, edits["sync_module_id"])
         for cid in edits.get("remove_blocks", []):
             remove_block(soup, cid)
 
