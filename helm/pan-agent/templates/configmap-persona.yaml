@@ -1060,14 +1060,19 @@ data:
 
     ## Content-editing principles: DOM targeting, never text substitution
 
-    eSputnik/Stripo exports tag almost every translatable text node and image
-    with a stable identifier already baked in by the visual editor: `data-cid` on
-    text blocks, `data-alt-cid`/`data-title-cid` on images (pairing with `alt`/
-    `title`). Target these directly — never regex/string-replace on serialized
-    HTML, which risks accidental double-matches, encoding drift, and subtle
-    whitespace/quote differences. Use `edit_message_html.py` (below) for this;
-    `--list-cids` on the source HTML gives a full inventory before touching
-    anything.
+    eSputnik/Stripo exports tag almost every translatable text node, image, and
+    link with a stable identifier already baked in by the visual editor:
+    `data-cid` on text blocks, `data-alt-cid`/`data-title-cid` on images (pairing
+    with `alt`/`title`), **`data-href-cid` on `<a href>` elements** (confirmed
+    live on a real production export — e.g. a product "buy now" link) — this is
+    what makes a link's target rewritable per locale (a product page under one
+    country's domain needs to become the same product under the target locale's
+    own domain; use the per-variant `url` the price/stock lookup below already
+    returns). Target all four directly — never regex/string-replace on
+    serialized HTML, which risks accidental double-matches, encoding drift, and
+    subtle whitespace/quote differences. Use `edit_message_html.py` (below) for
+    this; `--list-cids` on the source HTML gives a full inventory before
+    touching anything.
 
     **Product names: never translate the source message's own product-name text
     outward.** Confirmed live 2026-09-02: doing so produced real, human-visible
@@ -1095,6 +1100,26 @@ data:
     a narrower removal. Verify with `--list-cids` before and after a removal if
     unsure the whole block moved — element identity from a parse is only
     meaningful within one script invocation, never across two separate runs.
+
+    **Multi-column (mobile-adaptive) blocks: one `td.esd-structure` can hold more
+    than one independently-removable product.** Confirmed live on a real 2-up
+    product row: a single `td.esd-structure` contained two sibling `<table>`
+    columns (`es-left`/`es-right`, one product each), floated side by side for
+    normal clients and rebuilt as an explicit Outlook-only 2-column table via
+    `<!--[if mso]>...<![endif]-->` comments around them. If only one of the two
+    products needs dropping (not the whole row), walking straight to
+    `td.esd-structure` and removing its parent `tr` — the single-block technique
+    above — wrongly takes *both* products with it. `remove_blocks` handles this:
+    when the cid's `td.esd-structure` has more than one direct-child `<table>`,
+    it removes only the specific column table containing that cid, leaving the
+    sibling column(s) untouched. **The MSO comments are NOT rebalanced
+    automatically** — they're opaque text to the parser, not real tags, so
+    decomposing a column table doesn't touch them. After any column removal,
+    inspect the raw output HTML by eye around that block and fix or remove the
+    matching MSO `<td width="...">`/`<td width="20"></td>` comment fragments by
+    hand, or Outlook renders a stale/empty column. The script prints a reminder
+    to stderr whenever this path is taken — don't skip that check because the
+    web/Gmail preview looks fine.
 
     ## Upload/write mechanics
 
@@ -1661,11 +1686,12 @@ data:
     ```python
     #!/usr/bin/env python3
     """
-    esputnik-multilang-campaign DOM editor. v1
+    esputnik-multilang-campaign DOM editor. v2
 
-    Applies data-cid/data-alt-cid/data-title-cid-targeted edits to an
-    eSputnik/Stripo email export, and removes whole content blocks cleanly (not
-    just the innermost row). Never does text substitution on serialized HTML --
+    Applies data-cid/data-alt-cid/data-title-cid/data-href-cid-targeted edits to
+    an eSputnik/Stripo email export, and removes whole content blocks (or, for a
+    multi-column mobile-adaptive block, just one column) cleanly -- never the
+    innermost row alone. Never does text substitution on serialized HTML --
     always parses first.
 
     Usage:
@@ -1675,22 +1701,39 @@ data:
     edits.json shape:
     {
       "set_text":     {"<cid>": "new text", ...},
-      "set_attr":     {"<cid>": {"alt": "...", "title": "..."}, ...},
+      "set_attr":     {"<cid>": {"alt": "...", "title": "...", "href": "..."}, ...},
       "remove_blocks": ["<cid>", ...]
     }
 
-    A "<cid>" is matched against data-cid, data-alt-cid, and data-title-cid, in
-    that order, on any element in the document -- pass whichever value turned up
-    while inventorying the source HTML (--list-cids), regardless of which
-    attribute it actually lives on.
+    A "<cid>" is matched against data-cid, data-alt-cid, data-title-cid, and
+    data-href-cid, in that order, on any element in the document -- pass
+    whichever value turned up while inventorying the source HTML (--list-cids),
+    regardless of which attribute it actually lives on. data-href-cid tags an
+    <a href> element itself (confirmed live on a real production export, e.g. a
+    "buy now" product link) -- use set_attr with an "href" key on that cid to
+    retarget the link at another locale's storefront (e.g. the per-variant `url`
+    the price/stock lookup script already returns), never string-replace the
+    domain in the raw HTML.
 
     remove_blocks: locates the block by cid, walks up to the nearest ancestor
     <td class="esd-structure"> (not just the immediate <tr>, which would leave
     sibling rows -- heading/paragraph/button -- of the same visual block
-    behind), then removes THAT td's own parent <tr>. Verify with --list-cids
-    before AND after a removal if not certain the whole block moved -- this is
-    a same-process operation, so BeautifulSoup element identity is only
-    meaningful within this one script run, never across separate invocations.
+    behind). Two cases from there:
+      - Single-block td.esd-structure (one visual block, the common case):
+        removes THAT td's own parent <tr> -- the whole section.
+      - Multi-column td.esd-structure (confirmed live: a mobile-adaptive 2-up
+        product row, two sibling <table class="es-left"/"es-right"> columns
+        under one shared td.esd-structure, rebuilt for Outlook via
+        "<!--[if mso]>...<![endif]-->" comments around them): removes only the
+        specific direct-child <table> column containing the given cid, leaving
+        sibling column(s) untouched, and prints a reminder to stderr that the
+        MSO comments are NOT rebalanced automatically -- they're opaque text to
+        the parser, not real tags, so check/fix them by hand afterward or
+        Outlook renders a stale/empty column.
+    Verify with --list-cids before AND after a removal if not certain the right
+    scope moved -- this is a same-process operation, so BeautifulSoup element
+    identity is only meaningful within this one script run, never across
+    separate invocations.
     """
     import argparse
     import json
@@ -1698,7 +1741,7 @@ data:
 
     from bs4 import BeautifulSoup
 
-    CID_ATTRS = ("data-cid", "data-alt-cid", "data-title-cid")
+    CID_ATTRS = ("data-cid", "data-alt-cid", "data-title-cid", "data-href-cid")
 
 
     def find_by_cid(soup, cid):
@@ -1745,6 +1788,42 @@ data:
                 "removing its immediate parent alone would likely leave sibling "
                 "rows of the same visual block behind; refusing to guess"
             )
+
+        columns = block_td.find_all("table", recursive=False)
+        if len(columns) > 1:
+            # Multi-column (mobile-adaptive) block: this esd-structure td holds
+            # more than one independently-removable product/column (e.g. a
+            # floated es-left/es-right pair), not one single-block section --
+            # removing the whole parent tr would wrongly take every column with
+            # it. Remove only the direct-child <table> that actually contains
+            # this cid.
+            column = None
+            node = el
+            while node is not None:
+                if node.parent is block_td:
+                    column = node
+                    break
+                node = node.parent
+            if column is None or column.name != "table":
+                raise ValueError(
+                    f"cid {cid!r} is inside a multi-column td.esd-structure but "
+                    "isn't nested under one of its direct-child <table> columns "
+                    "-- can't tell which column to remove, refusing to guess"
+                )
+            column.decompose()
+            print(
+                f"NOTE: cid {cid!r} was inside a multi-column (mobile-adaptive) "
+                "block -- removed only that one column. This template pattern "
+                "wraps columns in Outlook-only '<!--[if mso]>...<![endif]-->' "
+                "comments that BeautifulSoup treats as opaque text, NOT real "
+                "tags -- they were NOT rebalanced. Inspect the raw output HTML "
+                "around this block by eye and fix/remove the matching MSO "
+                "<td width=\"...\"> comment fragments by hand, or Outlook will "
+                "render a stale/empty column.",
+                file=sys.stderr,
+            )
+            return
+
         row = block_td.find_parent("tr")
         if row is None:
             raise ValueError(f"cid {cid!r}'s esd-structure td has no parent tr")
@@ -1756,7 +1835,7 @@ data:
         ap.add_argument("input_html")
         ap.add_argument("edits_json", nargs="?", help="JSON file with set_text/set_attr/remove_blocks")
         ap.add_argument("output_html", nargs="?")
-        ap.add_argument("--list-cids", action="store_true", help="print every data-cid/data-alt-cid/data-title-cid found and exit")
+        ap.add_argument("--list-cids", action="store_true", help="print every data-cid/data-alt-cid/data-title-cid/data-href-cid found and exit")
         args = ap.parse_args()
 
         with open(args.input_html, encoding="utf-8") as f:
