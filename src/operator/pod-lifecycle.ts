@@ -11,6 +11,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The boot-time default a person's pod gets `PERSON_CONTEXT_LIMIT` set to —
+ * only a starting point, not the last word: session-controller.ts's own
+ * `/context_limit` override always wins once one exists, persisted on the
+ * person's NFS home dir (sdk-session.ts's readSavedContextLimit/
+ * saveContextLimit, same pattern as session-id persistence) rather than
+ * here, since that survives an in-place container restart too — a plain env
+ * var, fixed at Pod creation, would not (see runner/index.ts's main()).
+ */
+function resolveDefaultContextLimit(cfg: OperatorConfig, slug: string): number {
+  return cfg.highContextLimitSlugs.includes(slug) ? cfg.highContextLimit : cfg.defaultContextLimit;
+}
+
 /** Create the pod if it doesn't already exist. Idempotent. */
 export async function ensurePersonPod(
   api: CoreV1Api,
@@ -24,7 +37,16 @@ export async function ensurePersonPod(
   if (existing) return;
   await ensurePersonHomeDirs(slug);
   const state = await readPersonState(api, cfg.namespace, slug);
-  const spec = buildPersonPodSpec(cfg, slug, chatId, tz, tasksToken, state?.customEnv ?? {}, state?.toolPermissions ?? {});
+  const spec = buildPersonPodSpec(
+    cfg,
+    slug,
+    chatId,
+    tz,
+    tasksToken,
+    state?.customEnv ?? {},
+    state?.toolPermissions ?? {},
+    resolveDefaultContextLimit(cfg, slug),
+  );
   await createPod(api, cfg.namespace, spec);
   log.line('pod_created', { person: slug });
 }

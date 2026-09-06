@@ -90,8 +90,13 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
 // choice of a much tighter ceiling (session-controller.ts's
 // `maybeTriggerAutoCompact`), enforced independently rather than relying on
 // any SDK setting (`settings.autoCompactWindow` was tried and confirmed to
-// have zero effect on the SDK's own threshold). Shared so person-commands.ts
-// can say what a limit reset reverts to, without duplicating the number.
+// have zero effect on the SDK's own threshold).
+// The real effective default is now per-person and operator-configured
+// (OperatorConfig.defaultContextLimit / highContextLimit, resolved in
+// pod-lifecycle.ts's ensurePersonPod and passed to the pod as
+// PERSON_CONTEXT_LIMIT) — this constant is only runner/config.ts's
+// last-resort fallback for the (should-never-happen) case that env var is
+// missing.
 export const DEFAULT_CONTEXT_LIMIT = 250_000;
 
 export interface ContextUsageSummary {

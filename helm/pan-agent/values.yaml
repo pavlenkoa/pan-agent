@@ -26,6 +26,16 @@ operator:
   # homelab, so it's a plain default here rather than requiring every
   # environment's values file to set it.
   publicCallbackHost: api.pavlenko.io
+  # Auto-compact token ceiling (session-controller.ts) a person gets at pod
+  # create/recreate time, absent their own /context_limit override
+  # (persisted per-person, always wins once set). highSlugs is a deliberately
+  # explicit allowlist for heavier/longer-running usage, not self-service —
+  # environment-specific person slugs belong in the deploying cluster's
+  # values file (e.g. homelab's), not here.
+  contextLimits:
+    default: 400000
+    high: 700000
+    highSlugs: []
   resources:
     requests:
       cpu: 50m

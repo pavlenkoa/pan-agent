@@ -59,6 +59,12 @@ spec:
               value: {{ .Values.operator.publicCallbackHost | quote }}
             - name: DEFAULT_TZ
               value: {{ .Values.defaultTz | quote }}
+            - name: DEFAULT_CONTEXT_LIMIT
+              value: {{ .Values.operator.contextLimits.default | quote }}
+            - name: HIGH_CONTEXT_LIMIT
+              value: {{ .Values.operator.contextLimits.high | quote }}
+            - name: HIGH_CONTEXT_LIMIT_SLUGS
+              value: {{ join "," .Values.operator.contextLimits.highSlugs | quote }}
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

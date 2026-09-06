@@ -128,6 +128,10 @@ describe('createSessionController', () => {
       workspaceCwd: dir,
       claudeHome: dir,
       sessionIdFile: path.join(dir, 'session-id'),
+      // High enough that no test triggers auto-compact unintentionally —
+      // tests that actually exercise it call controller.setContextLimit()
+      // explicitly to lower it.
+      contextLimit: 1_000_000,
     };
     vi.clearAllMocks();
     controller = undefined;
@@ -393,6 +397,47 @@ describe('createSessionController', () => {
     await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
     fakeEvents.push(resultMessage('back to normal'));
     await expect(nextTurn).resolves.toEqual({ replyText: 'back to normal', ok: true, turnEnd: httpTurnEnd() });
+  });
+
+  it('a timed-out auto-compact retries on its own schedule, without waiting for another real turn', async () => {
+    // Confirmed live 2026-09-06: a failed auto-compact previously only ever
+    // retried opportunistically, the next time some unrelated real turn
+    // happened to finish — for a person whose only regular activity is a
+    // single daily scheduled task, that left it stuck failing once a day
+    // with nothing else ever nudging it. This test drives no second turn at
+    // all; the retry must fire from its own backoff timer.
+    let totalTokens = 150;
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents, () => totalTokens), 100, [50]);
+    await controller.start();
+    await flushMicrotasks();
+    controller.setContextLimit(100);
+
+    const turnPromise = controller.submitTurn(chatTurn, 'turn-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('hi back'));
+    await expect(turnPromise).resolves.toEqual({ replyText: 'hi back', ok: true, turnEnd: httpTurnEnd() });
+
+    // Auto-compact starts on its own and is never given a result -> times out.
+    await vi.waitFor(() =>
+      expect(sendTelegramReply).toHaveBeenCalledWith(
+        cfg.telegramBotToken,
+        cfg.chatId,
+        '⚠️ Auto-compact timed out — context is still over your 100-token limit, will retry automatically.',
+      ),
+    );
+
+    // No submitTurn call here at all — the only thing that can start a
+    // second attempt is the retry backoff timer.
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage(''));
+    await vi.waitFor(() =>
+      expect(sendTelegramReply).toHaveBeenCalledWith(
+        cfg.telegramBotToken,
+        cfg.chatId,
+        '✅ Auto-compacted: context passed your 100-token limit.',
+      ),
+    );
   });
 
   it('a queryFn that throws rejects the in-flight job instead of hanging', async () => {

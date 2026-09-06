@@ -17,6 +17,15 @@ function parseAllowedIds(raw: string | undefined): number[] {
   return parsed.map(Number).filter(Number.isFinite);
 }
 
+/** HIGH_CONTEXT_LIMIT_SLUGS is a comma-separated list of person slugs, e.g. "andrii-pavlenko,tania". */
+function parseSlugList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 export interface OperatorConfig {
   namespace: string;
   image: string;
@@ -39,6 +48,11 @@ export interface OperatorConfig {
   oauthCallbackPort: number;
   /** Public hostname the callback is actually reachable at (e.g. api.pavlenko.io) — used to build the exact `redirect_uri` registered with eSputnik, which must stay byte-identical on every call. */
   publicCallbackHost: string;
+  /** The auto-compact token ceiling (session-controller.ts) a person gets at pod create/recreate time, absent an explicit /context_limit override (PersonState.contextLimit) — see pod-lifecycle.ts's ensurePersonPod. */
+  defaultContextLimit: number;
+  /** Person slugs who get highContextLimit instead of defaultContextLimit — a deliberately small, explicit allowlist (heavier/longer-running usage), not a per-person self-service setting. */
+  highContextLimitSlugs: string[];
+  highContextLimit: number;
 }
 
 export function loadOperatorConfig(): OperatorConfig {
@@ -63,5 +77,8 @@ export function loadOperatorConfig(): OperatorConfig {
     podReadyTimeoutMs: Number(process.env['POD_READY_TIMEOUT_MS'] ?? 120_000),
     oauthCallbackPort: Number(process.env['OAUTH_CALLBACK_PORT'] ?? 8082),
     publicCallbackHost: process.env['PUBLIC_CALLBACK_HOST'] ?? 'api.pavlenko.io',
+    defaultContextLimit: Number(process.env['DEFAULT_CONTEXT_LIMIT'] ?? 400_000),
+    highContextLimitSlugs: parseSlugList(process.env['HIGH_CONTEXT_LIMIT_SLUGS']),
+    highContextLimit: Number(process.env['HIGH_CONTEXT_LIMIT'] ?? 700_000),
   };
 }

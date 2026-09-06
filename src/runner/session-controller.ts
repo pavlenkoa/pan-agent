@@ -16,7 +16,6 @@ import { query as sdkQuery, type McpServerConfig, type Query, type SDKMessage, t
 
 import { log, truncateText } from '../shared/log.js';
 import {
-  DEFAULT_CONTEXT_LIMIT,
   type ContextUsageSummary,
   type EffortLevel,
   type EsputnikServerStatus,
@@ -140,6 +139,23 @@ interface Job {
 // from nanoclaw's MAILBOX_FAILURE_STREAK_EXIT -> process.exit pattern).
 const RESTART_BACKOFFS_MS = [1000, 2000, 4000];
 
+// A failed auto-compact otherwise only retries opportunistically, the next
+// time some unrelated real turn happens to finish (maybeTriggerAutoCompact is
+// called from finishCurrentJob, never on its own timer). Confirmed live
+// 2026-09-06: for a person whose only regular activity is a single daily
+// scheduled task, that's one retry opportunity per 24h — one person's
+// context grew unchecked for 3 straight days (459k -> 467k -> 474k tokens
+// against a 250k limit) because each day's lone retry attempt also failed
+// and nothing else ever nudged it again in between. This gives a failed
+// auto-compact its own independent retry schedule regardless of chat
+// activity. Capped rather than fixed-interval: a person who's actively
+// chatting will usually clear it via the opportunistic path long before the
+// first backoff even fires, so this only matters for the low-activity case
+// it exists for — and if the SDK-side hang is more than transient, retrying
+// every couple of minutes forever would just spend money on repeated
+// multi-minute /compact attempts for no benefit.
+const AUTO_COMPACT_RETRY_BACKOFFS_MS = [2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,6 +165,7 @@ export function createSessionController(
   cfg: RunnerConfig,
   queryFn: QueryFn = sdkQuery,
   controlTurnTimeoutMs = 180_000,
+  autoCompactRetryBackoffsMs = AUTO_COMPACT_RETRY_BACKOFFS_MS,
 ): SessionController {
   const inputQueue = createPushableQueue<SDKUserMessage>();
   const reactionQueue: PendingReaction[] = [];
@@ -162,7 +179,17 @@ export function createSessionController(
   // Tracked locally rather than read back from the SDK — it exposes no
   // getter for either (confirmed: no getSettings()-equivalent on Query).
   let effortLevel: EffortLevel = 'medium';
-  let contextLimit = DEFAULT_CONTEXT_LIMIT;
+  // cfg.contextLimit is the operator-resolved boot-time value — this
+  // person's own /context_limit override if they have one, else their
+  // computed per-person default (see pod-lifecycle.ts's resolveContextLimit
+  // and runner/config.ts). setContextLimit below only ever changes it
+  // in-memory for the rest of this process's life.
+  let contextLimit = cfg.contextLimit;
+  // See AUTO_COMPACT_RETRY_BACKOFFS_MS's comment — an independent retry
+  // schedule for a failed auto-compact, on top of the opportunistic
+  // next-real-turn path. Reset to 0 the moment a compact actually succeeds.
+  let autoCompactRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoCompactRetryAttempt = 0;
   // Reset at the top of every runSupervised loop iteration (cold start and
   // every crash-restart both re-read the credentials file fresh, so a prior
   // session's dynamic-add history is meaningless to the new one — see
@@ -412,6 +439,27 @@ ${noUpdateInstruction(
     void runAutoCompact(totalTokens);
   }
 
+  function clearAutoCompactRetry(): void {
+    if (autoCompactRetryTimer) {
+      clearTimeout(autoCompactRetryTimer);
+      autoCompactRetryTimer = null;
+    }
+  }
+
+  /** Schedules the next independent retry attempt — see AUTO_COMPACT_RETRY_BACKOFFS_MS's doc comment. */
+  function scheduleAutoCompactRetry(): void {
+    clearAutoCompactRetry();
+    const delay =
+      autoCompactRetryBackoffsMs[Math.min(autoCompactRetryAttempt, autoCompactRetryBackoffsMs.length - 1)] ??
+      autoCompactRetryBackoffsMs[autoCompactRetryBackoffsMs.length - 1] ??
+      30 * 60_000;
+    autoCompactRetryAttempt += 1;
+    autoCompactRetryTimer = setTimeout(() => {
+      autoCompactRetryTimer = null;
+      void checkContextAndMaybeAutoCompact();
+    }, delay);
+  }
+
   async function runAutoCompact(totalTokens: number): Promise<void> {
     const turnId = `auto-compact:${Date.now()}`;
     const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: '/compact' }, parent_tool_use_id: null };
@@ -420,9 +468,15 @@ ${noUpdateInstruction(
     try {
       const result = await startJob('auto_compact', turnId, message);
       log.line('auto_compact_triggered', { person: cfg.slug, totalTokens, contextLimit, ok: result.ok });
+      if (result.ok) {
+        autoCompactRetryAttempt = 0;
+        clearAutoCompactRetry();
+      } else {
+        scheduleAutoCompactRetry();
+      }
       const notice = result.ok
         ? `✅ Auto-compacted: context passed your ${contextLimit.toLocaleString()}-token limit.`
-        : `⚠️ Auto-compact timed out — context is still over your ${contextLimit.toLocaleString()}-token limit, will retry after your next message.`;
+        : `⚠️ Auto-compact timed out — context is still over your ${contextLimit.toLocaleString()}-token limit, will retry automatically.`;
       log.line('system_notice', { person: cfg.slug, turn: turnId, text: notice });
       await sendTelegramReply(cfg.telegramBotToken, cfg.chatId, notice);
     } catch (err) {
@@ -515,6 +569,7 @@ ${noUpdateInstruction(
     },
     async stop(): Promise<void> {
       stopped = true;
+      clearAutoCompactRetry();
       inputQueue.close();
       if (queryHandle) await queryHandle.return(undefined).catch(() => {});
       await supervisorLoop?.catch(() => {});

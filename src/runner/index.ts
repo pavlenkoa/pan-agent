@@ -25,7 +25,14 @@ import { ESPUTNIK_SERVER_URL, type ControlRequest, type ControlResponse, type Tu
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
 import { createSessionController } from './session-controller.js';
-import { esputnikToolPolicy, personaChangedSinceLastAck, readSavedSessionId, resolveReplyText } from './sdk-session.js';
+import {
+  esputnikToolPolicy,
+  personaChangedSinceLastAck,
+  readSavedContextLimit,
+  readSavedSessionId,
+  resolveReplyText,
+  saveContextLimit,
+} from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
@@ -108,6 +115,13 @@ async function main(): Promise<void> {
 
   const controller = createSessionController(cfg);
   await controller.start();
+  // A saved /context_limit override always wins over cfg.contextLimit (the
+  // operator's per-person default, fixed at Pod creation/recreation) — see
+  // readSavedContextLimit's doc comment for why an env var alone can't
+  // survive an in-place container restart. Applied before the HTTP server
+  // starts listening below, so no real turn can race in ahead of it.
+  const savedContextLimit = await readSavedContextLimit(cfg);
+  if (savedContextLimit != null) controller.setContextLimit(savedContextLimit);
   if (wasResuming && personaChanged) {
     void controller.nudgePersonaRefresh();
   }
@@ -232,6 +246,7 @@ async function main(): Promise<void> {
         response = { ok: true, action: 'set_effort' };
       } else if (body.action === 'set_context_limit') {
         controller.setContextLimit(body.tokens);
+        await saveContextLimit(cfg, body.tokens);
         response = { ok: true, action: 'set_context_limit' };
       } else if (body.action === 'sync_esputnik_mcp') {
         const mode = await controller.syncMcpServer(body.serverKey, {

@@ -21,6 +21,7 @@ export const RESERVED_ENV_NAMES = new Set([
   'PERSON_TASKS_TOKEN',
   'PERSON_CUSTOM_VARS_DOC',
   'PERSON_TOOL_PERMISSIONS',
+  'PERSON_CONTEXT_LIMIT',
   'TZ',
   'LANG',
   'OPERATOR_TASKS_URL',
@@ -54,6 +55,7 @@ export function buildPersonPodSpec(
   tasksToken: string,
   customEnv: Record<string, CustomEnvVar> = {},
   toolPermissions: PersonState['toolPermissions'] = {},
+  contextLimit: number = cfg.defaultContextLimit,
 ): V1Pod {
   const name = podName(slug);
   const peopleHome = `${cfg.nfsRootPath}/people/${slug}`;
@@ -98,6 +100,7 @@ export function buildPersonPodSpec(
             secretEnv('SEEDPOOL_API_KEY', 'pan-agent-seedpool', 'SEEDPOOL_API_KEY'),
             { name: 'PERSON_CUSTOM_VARS_DOC', value: JSON.stringify(customVarsDoc) },
             { name: 'PERSON_TOOL_PERMISSIONS', value: JSON.stringify(Object.keys(toolPermissions)) },
+            { name: 'PERSON_CONTEXT_LIMIT', value: String(contextLimit) },
             ...customEnvEntries.map(([varName, v]) => ({ name: varName, value: v.value })),
           ],
           ports: [{ containerPort: RUNNER_PORT, name: 'http' }],

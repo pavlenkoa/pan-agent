@@ -46,6 +46,33 @@ export async function saveSessionId(cfg: RunnerConfig, sessionId: string): Promi
 }
 
 /**
+ * An explicit /context_limit override, persisted to the person's own
+ * NFS-mounted claude-home dir — same pattern and same durability guarantee
+ * as session-id above, deliberately not the operator-set PERSON_CONTEXT_LIMIT
+ * env var: that's fixed at Pod creation/recreation time, so it would NOT
+ * reflect a /context_limit call made afterward on an in-place container
+ * restart (the common restart path — restartPolicy: Always brings the
+ * container back up in the *same* Pod object, same env). The NFS file
+ * survives both that and a full pod recreate (same NFS path either way), so
+ * it's read at boot (runner/index.ts's main()) and always wins over the env
+ * var once it exists.
+ */
+export async function readSavedContextLimit(cfg: RunnerConfig): Promise<number | null> {
+  try {
+    const raw = (await readFile(cfg.contextLimitFile, 'utf8')).trim();
+    const tokens = Number(raw);
+    return raw && Number.isFinite(tokens) ? tokens : null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+export async function saveContextLimit(cfg: RunnerConfig, tokens: number): Promise<void> {
+  await writeFile(cfg.contextLimitFile, String(tokens), 'utf8');
+}
+
+/**
  * Confirmed against the installed SDK's own type declarations (`sdk.d.ts`):
  * a resumed session's CLAUDE.md reload is not automatic — the only reload
  * primitive found (`SDKControlRegisterRepoRootRequest.reload_claude_md`) is

@@ -12,7 +12,9 @@ import {
   NO_UPDATE_MARKER,
   personaChangedSinceLastAck,
   readEsputnikMcpServers,
+  readSavedContextLimit,
   resolveReplyText,
+  saveContextLimit,
 } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
@@ -270,6 +272,49 @@ describe('personaChangedSinceLastAck', () => {
     await personaChangedSinceLastAck(cfg, 'content v1');
     await personaChangedSinceLastAck(cfg, 'content v2');
     expect(await personaChangedSinceLastAck(cfg, 'content v2')).toBe(false);
+  });
+});
+
+describe('readSavedContextLimit / saveContextLimit', () => {
+  let dir: string;
+  let cfg: RunnerConfig;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-context-limit-'));
+    cfg = {
+      slug: 'test',
+      chatId: 1,
+      tz: 'UTC',
+      port: 8080,
+      operatorTasksUrl: 'http://operator.invalid',
+      tasksToken: 'test-token',
+      telegramBotToken: 'bot-token',
+      journalDir: dir,
+      workspaceCwd: dir,
+      claudeHome: dir,
+      sessionIdFile: path.join(dir, 'session-id'),
+      customVarsDoc: [],
+      contextLimitFile: path.join(dir, 'context-limit'),
+    } as unknown as RunnerConfig;
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns null when no override has ever been saved', async () => {
+    expect(await readSavedContextLimit(cfg)).toBeNull();
+  });
+
+  it('reads back exactly what was saved', async () => {
+    await saveContextLimit(cfg, 400_000);
+    expect(await readSavedContextLimit(cfg)).toBe(400_000);
+  });
+
+  it('reflects the latest save, not the first one', async () => {
+    await saveContextLimit(cfg, 400_000);
+    await saveContextLimit(cfg, 700_000);
+    expect(await readSavedContextLimit(cfg)).toBe(700_000);
   });
 });
 

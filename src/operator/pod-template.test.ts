@@ -56,9 +56,25 @@ describe('buildPersonPodSpec — custom env vars', () => {
   });
 
   it('RESERVED_ENV_NAMES covers every literal name already used in the pod spec', () => {
-    for (const name of ['PERSON_SLUG', 'PERSON_CHAT_ID', 'PERSON_TASKS_TOKEN', 'PERSON_TOOL_PERMISSIONS', 'TZ', 'LANG', 'GH_TOKEN']) {
+    for (const name of [
+      'PERSON_SLUG',
+      'PERSON_CHAT_ID',
+      'PERSON_TASKS_TOKEN',
+      'PERSON_TOOL_PERMISSIONS',
+      'PERSON_CONTEXT_LIMIT',
+      'TZ',
+      'LANG',
+      'GH_TOKEN',
+    ]) {
       expect(RESERVED_ENV_NAMES.has(name)).toBe(true);
     }
+  });
+});
+
+describe('buildPersonPodSpec — context limit', () => {
+  it('passes the resolved context limit through as a plain env var', () => {
+    const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token', {}, {}, 400_000);
+    expect(envMap(pod).get('PERSON_CONTEXT_LIMIT')).toBe('400000');
   });
 });
 

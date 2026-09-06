@@ -1,3 +1,5 @@
+import { DEFAULT_CONTEXT_LIMIT } from '../shared/types.js';
+
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var ${name}`);
@@ -48,6 +50,10 @@ export interface RunnerConfig {
   sessionIdFile: string;
   customVarsDoc: CustomVarDoc[];
   toolPermissions: string[];
+  /** The auto-compact ceiling to boot session-controller.ts with — this person's computed default (pod-lifecycle.ts's resolveDefaultContextLimit), overridden at runtime by main() if a saved /context_limit override exists on NFS (sdk-session.ts's readSavedContextLimit). Falls back to DEFAULT_CONTEXT_LIMIT only if the operator somehow didn't set PERSON_CONTEXT_LIMIT (should never happen outside tests/dev). */
+  contextLimit: number;
+  /** NFS-persisted /context_limit override — same durability pattern as sessionIdFile (survives an in-place container restart, unlike the env var above, which is fixed at Pod creation). */
+  contextLimitFile: string;
 }
 
 export function loadRunnerConfig(): RunnerConfig {
@@ -66,5 +72,7 @@ export function loadRunnerConfig(): RunnerConfig {
     sessionIdFile: process.env['SESSION_ID_FILE'] ?? `${claudeHome}/pan-agent-session-id`,
     customVarsDoc: parseCustomVarsDoc(process.env['PERSON_CUSTOM_VARS_DOC']),
     toolPermissions: parseToolPermissions(process.env['PERSON_TOOL_PERMISSIONS']),
+    contextLimit: Number(process.env['PERSON_CONTEXT_LIMIT'] ?? DEFAULT_CONTEXT_LIMIT),
+    contextLimitFile: process.env['CONTEXT_LIMIT_FILE'] ?? `${claudeHome}/pan-agent-context-limit`,
   };
 }

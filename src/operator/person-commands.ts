@@ -13,7 +13,6 @@
  */
 import { log } from '../shared/log.js';
 import {
-  DEFAULT_CONTEXT_LIMIT,
   esputnikServerKey,
   type ChatMessage,
   type ControlResponse,
@@ -543,10 +542,7 @@ async function handleContextLimit(deps: RouterDeps, slug: string, person: Person
     await deps.telegram.sendMessage(person.chatId, `Couldn't set context limit: ${result.error}`);
     return;
   }
-  await deps.telegram.sendMessage(
-    person.chatId,
-    `Context limit set to ${tokens.toLocaleString()} tokens for this session (resets to ${DEFAULT_CONTEXT_LIMIT.toLocaleString()} if your pod restarts).`,
-  );
+  await deps.telegram.sendMessage(person.chatId, `Context limit set to ${tokens.toLocaleString()} tokens — stays across pod restarts.`);
 }
 
 const ESPUTNIK_ACCOUNT_RE = /^[a-z][a-z0-9_]{0,31}$/;
