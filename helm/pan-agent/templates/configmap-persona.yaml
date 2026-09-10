@@ -771,6 +771,16 @@ data:
       workflow/callout/message with `sent, delivered, opened, clicked, spam,
       bounced, unsubscribed, orders` — `delivered` is the volume metric to use
       (matches what the eSputnik report UI plots as "Доставлено").
+    - `get_messaging_analytics` and `get_events_analytics` are rate-limited to
+      **10 calls per 60 seconds per MCP client** (per Yespo's own plugin docs for
+      this same MCP server — not yet hit live in this skill's own runs). Not a
+      reason to call less in the normal path — the daily/weekly procedure below
+      stays as-is. It only matters for handling a failure: if either call ever
+      errors out, check whether it's this rate limit before treating an
+      empty/missing result as zero volume. Back off a few seconds and retry once;
+      never read a throttled call as `delivered: 0` — a rate-limit failure is not
+      the same signal as a real flatline, and misreading one as the other is
+      exactly the kind of false positive this skill exists to avoid.
     - **Dry run confirmed live 2026-08-29** (real account data, no state file,
       nothing sent): of ~30 active campaigns above the volume floor, exactly two
       flatlined to 0 in the recent window. One (`Preprocessor`/`hit_orders`) was
