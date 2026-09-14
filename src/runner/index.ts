@@ -14,7 +14,7 @@
  * async steps.
  */
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -24,6 +24,7 @@ import { log, truncateText } from '../shared/log.js';
 import { ESPUTNIK_SERVER_URL, type ControlRequest, type ControlResponse, type TurnRequest } from '../shared/types.js';
 import { loadRunnerConfig, type RunnerConfig } from './config.js';
 import { createJournal } from './journal.js';
+import { installPersonaFiles } from './persona-install.js';
 import { createSessionController } from './session-controller.js';
 import {
   esputnikToolPolicy,
@@ -36,7 +37,6 @@ import {
 import { sendTelegramReply } from './telegram-send.js';
 
 const execFileAsync = promisify(execFile);
-const PERSONA_MOUNT_DIR = '/config';
 
 /** Best-effort — same bot identity the old single-tenant image configured at startup. */
 async function ensureGitIdentity(): Promise<void> {
@@ -46,57 +46,6 @@ async function ensureGitIdentity(): Promise<void> {
     if (process.env['GH_TOKEN']) await execFileAsync('gh', ['auth', 'setup-git']);
   } catch (err) {
     log.error('git_identity_setup_failed', err);
-  }
-}
-
-/** Renders the person's own /set_var'd variables (names + descriptions only, never values) as a CLAUDE.md section. */
-function renderCustomVarsSection(cfg: RunnerConfig): string {
-  if (cfg.customVarsDoc.length === 0) return '';
-  const lines = cfg.customVarsDoc.map((v) => `- \`${v.name}\` — ${v.description || '(no description given)'}`);
-  return `
-
-## Your custom environment variables
-
-Set via /set_var by the person you're assisting — already present in your Bash environment, not something you need to load or ask for:
-
-${lines.join('\n')}`;
-}
-
-/** Every `SKILL-<name>.md` key in the persona ConfigMap becomes a shared skill `<name>`, installed for every person. Matches `SHARED_SKILL_NAMES` in `operator/nfs.ts` — a name added here must be added there too, or `/skills` will misreport it as person-authored and `/forget_skill` will delete it (it'll just come back on next boot, but the listing will lie in the meantime). */
-const SHARED_SKILL_FILE_PATTERN = /^SKILL-(.+)\.md$/;
-
-/**
- * The pan-agent-persona ConfigMap is mounted read-only at /config — that's
- * not a path the Claude Agent SDK's CLAUDE.md/skill auto-discovery ever
- * looks at (~/.claude/CLAUDE.md for identity/user-level memory,
- * <cwd>/.claude/skills/<name>/SKILL.md for project skills — matches what
- * CLAUDE.md itself already tells the model: "read .claude/skills/media/
- * SKILL.md in the workspace"). Copy it into place on every boot so a
- * ConfigMap update takes effect on the next pod restart, appending the
- * person's own custom-var doc (the runner has no k8s API access itself —
- * see the NetworkPolicy's comment on this — so this comes in via the
- * operator-set PERSON_CUSTOM_VARS_DOC env var instead of a direct read).
- */
-async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
-  try {
-    const sharedPersona = await readFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), 'utf8');
-    await writeFile(path.join(cfg.claudeHome, 'CLAUDE.md'), sharedPersona + renderCustomVarsSection(cfg));
-
-    const entries = await readdir(PERSONA_MOUNT_DIR);
-    const skillNames: string[] = [];
-    for (const entry of entries) {
-      const match = entry.match(SHARED_SKILL_FILE_PATTERN);
-      const skillName = match?.[1];
-      if (!skillName) continue;
-      const skillDir = path.join(cfg.workspaceCwd, '.claude', 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-      await copyFile(path.join(PERSONA_MOUNT_DIR, entry), path.join(skillDir, 'SKILL.md'));
-      skillNames.push(skillName);
-    }
-
-    log.line('persona_installed', { person: cfg.slug, customVars: cfg.customVarsDoc.length, sharedSkills: skillNames });
-  } catch (err) {
-    log.error('persona_install_failed', err, { person: cfg.slug });
   }
 }
 
