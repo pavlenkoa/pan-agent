@@ -176,6 +176,18 @@ export function createSessionController(
   let stopped = false;
   let consecutiveCrashes = 0;
   let supervisorLoop: Promise<void> | null = null;
+  // The SDK's `result.total_cost_usd` is cumulative for the whole query()
+  // stream, not per-turn (confirmed live 2026-09-14: a single person pod's
+  // successive turn_end lines read 3.07, 3.16, 3.30, ... — each the running
+  // total-to-date, not that turn's own cost). Logging it as-is made the
+  // Grafana usage dashboard's `sum(sum_over_time(...cost_usd...))` panel
+  // re-add the same running total once per turn, inflating a real ~$20/day
+  // fleet spend into a reported $452/day. This baseline is subtracted off so
+  // `job.costUsd` (and the `cost_usd` log field) is the true incremental
+  // cost of that one turn. Reset to 0 wherever a fresh `queryFn()` stream is
+  // started (runSupervised, below) since that's a brand new cost counter on
+  // the SDK side, whether from a genuine crash-restart or the pod's first boot.
+  let costBaseline = 0;
   // Tracked locally rather than read back from the SDK — it exposes no
   // getter for either (confirmed: no getSettings()-equivalent on Query).
   let effortLevel: EffortLevel = 'medium';
@@ -518,7 +530,8 @@ ${noUpdateInstruction(
 
       currentJob.ok = !message.is_error;
       currentJob.numTurns = message.num_turns;
-      currentJob.costUsd = message.total_cost_usd;
+      currentJob.costUsd = Math.max(0, message.total_cost_usd - costBaseline);
+      costBaseline = message.total_cost_usd;
       if (message.subtype === 'success') currentJob.replyText = message.result;
       currentJob.usage = summarizeUsage(message.modelUsage);
       finishCurrentJob();
@@ -532,6 +545,7 @@ ${noUpdateInstruction(
         const esputnikServers = await readEsputnikMcpServers(cfg);
         knownEsputnikKeys = new Set(Object.keys(esputnikServers));
         dynamicEsputnikServers.clear();
+        costBaseline = 0; // fresh queryFn() stream below = a fresh SDK cost counter, see costBaseline's doc comment
         const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, permissionGate, esputnikServers) });
         queryHandle = handle;
         await consumeQuery(handle);

@@ -17,13 +17,13 @@ vi.mock('./telegram-send.js', () => ({ sendTelegramReply: vi.fn().mockResolvedVa
 const { sendTelegramReply } = await import('./telegram-send.js');
 const { createSessionController } = await import('./session-controller.js');
 
-function resultMessage(text: string): SDKMessage {
+function resultMessage(text: string, totalCostUsd = 0): SDKMessage {
   return {
     type: 'result',
     subtype: 'success',
     is_error: false,
     num_turns: 1,
-    total_cost_usd: 0,
+    total_cost_usd: totalCostUsd,
     result: text,
     modelUsage: {},
     session_id: 'sess-1',
@@ -173,6 +173,32 @@ describe('createSessionController', () => {
 
     await expect(turnPromise).resolves.toEqual({ replyText: 'hello there', ok: true, turnEnd: httpTurnEnd() });
     expect(controller.isBusy()).toBe(false);
+  });
+
+  it("logs each turn's incremental cost, not the SDK's cumulative total_cost_usd", async () => {
+    // The SDK reports total_cost_usd cumulatively for the whole query()
+    // stream, not per-turn (this is what the Grafana usage-dashboard bug was:
+    // summing the raw field across turns double/triple/N-counted the running
+    // total). costUsd on each turnEnd must be the delta since the previous turn.
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+
+    const firstTurn = controller.submitTurn(chatTurn, 'turn-1');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('first reply', 3.0));
+    await expect(firstTurn).resolves.toEqual({ replyText: 'first reply', ok: true, turnEnd: httpTurnEnd({ costUsd: 3.0 }) });
+
+    const secondTurn = controller.submitTurn(chatTurn, 'turn-2');
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('second reply', 3.15));
+    // costUsd is floating-point subtraction (3.15 - 3.0), so match approximately.
+    await expect(secondTurn).resolves.toEqual({
+      replyText: 'second reply',
+      ok: true,
+      turnEnd: httpTurnEnd({ costUsd: expect.closeTo(0.15, 10) }),
+    });
   });
 
   it('persists the session id as soon as it is seen, before any result arrives', async () => {
