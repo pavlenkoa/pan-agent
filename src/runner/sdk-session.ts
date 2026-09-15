@@ -100,8 +100,7 @@ export async function saveContextLimit(cfg: RunnerConfig, tokens: number): Promi
  * person" from "resumed session, never hash-checked before" apart, so it
  * must not assume "no nudge" on their behalf.
  */
-export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentContent: string): Promise<boolean> {
-  const ackPath = path.join(cfg.claudeHome, 'pan-agent-persona-hash');
+async function hashChangedSinceLastAck(ackPath: string, currentContent: string): Promise<boolean> {
   const hash = createHash('sha256').update(currentContent).digest('hex');
   let prevHash: string | null;
   try {
@@ -112,6 +111,22 @@ export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentConte
   }
   await writeFile(ackPath, hash, 'utf8');
   return prevHash !== hash;
+}
+
+export async function personaChangedSinceLastAck(cfg: RunnerConfig, currentContent: string): Promise<boolean> {
+  return hashChangedSinceLastAck(path.join(cfg.claudeHome, 'pan-agent-persona-hash'), currentContent);
+}
+
+/**
+ * Same mechanism as `personaChangedSinceLastAck` above (see its doc comment
+ * for the full "why" — a resumed session doesn't pick up an on-disk change
+ * into its own memorized understanding any more than it does for CLAUDE.md),
+ * generalized to one shared `SKILL.md` at a time. The ack file is namespaced
+ * by skill name so that editing one shared skill acks only that skill —
+ * never silently acks every other shared skill's hash too.
+ */
+export async function skillChangedSinceLastAck(cfg: RunnerConfig, skillName: string, currentContent: string): Promise<boolean> {
+  return hashChangedSinceLastAck(path.join(cfg.claudeHome, `pan-agent-skill-hash-${skillName}`), currentContent);
 }
 
 /**

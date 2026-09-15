@@ -56,8 +56,14 @@ ${lines.join('\n')}`;
  * person's own custom-var doc (the runner has no k8s API access itself —
  * see the NetworkPolicy's comment on this — so this comes in via the
  * operator-set PERSON_CUSTOM_VARS_DOC env var instead of a direct read).
+ *
+ * Returns the shared skill names actually installed this call, so a caller
+ * (index.ts's `main()`) can re-read each one's freshly-written SKILL.md and
+ * hash-check it via `skillChangedSinceLastAck` (sdk-session.ts) — this
+ * function itself does no hash-checking, same separation of concerns as the
+ * CLAUDE.md install/re-read/hash-check split already has.
  */
-export async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
+export async function installPersonaFiles(cfg: RunnerConfig): Promise<{ skillNames: string[] }> {
   try {
     const sharedPersona = await readFile(path.join(PERSONA_MOUNT_DIR, 'CLAUDE.md'), 'utf8');
     await writeFile(path.join(cfg.claudeHome, 'CLAUDE.md'), sharedPersona + renderCustomVarsSection(cfg));
@@ -84,7 +90,9 @@ export async function installPersonaFiles(cfg: RunnerConfig): Promise<void> {
     }
 
     log.line('persona_installed', { person: cfg.slug, customVars: cfg.customVarsDoc.length, sharedSkills: skillNames });
+    return { skillNames };
   } catch (err) {
     log.error('persona_install_failed', err, { person: cfg.slug });
+    return { skillNames: [] };
   }
 }

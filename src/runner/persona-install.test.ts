@@ -86,6 +86,14 @@ describe('installPersonaFiles', () => {
     expect(installed).toBe('# Media skill\n');
   });
 
+  it('returns the installed shared skill names, so a caller can hash-check each one', async () => {
+    await writeFile(path.join(mountDir, 'CLAUDE.md'), '# Persona\n');
+    await writeFile(path.join(mountDir, 'SKILL-media.md'), '# Media skill\n');
+    await writeFile(path.join(mountDir, 'SKILL-esputnik-query.md'), '# Query skill\n');
+    const result = await installPersonaFiles(baseConfig());
+    expect(result.skillNames.sort()).toEqual(['esputnik-query', 'media']);
+  });
+
   it('installs an -ASSET- file alongside its skill, under the plain filename', async () => {
     await writeFile(path.join(mountDir, 'CLAUDE.md'), '# Persona\n');
     await writeFile(path.join(mountDir, 'SKILL-esputnik-trigger-monitor.md'), '# Monitor skill\n');
@@ -139,7 +147,7 @@ describe('installPersonaFiles', () => {
 
   it('does not throw when CLAUDE.md is missing from the mount dir (best-effort, logs and returns)', async () => {
     // mountDir intentionally has no CLAUDE.md written in this test.
-    await expect(installPersonaFiles(baseConfig())).resolves.toBeUndefined();
+    await expect(installPersonaFiles(baseConfig())).resolves.toEqual({ skillNames: [] });
     const skillsDirMissing = await readFile(path.join(workspaceDir, '.claude', 'skills'), 'utf8').catch(
       (err: NodeJS.ErrnoException) => err.code,
     );

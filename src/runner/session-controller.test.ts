@@ -272,6 +272,21 @@ describe('createSessionController', () => {
     expect(controller.isBusy()).toBe(false);
   });
 
+  it('nudgeSkillRefresh never delivers its reply to Telegram, no matter what the model says', async () => {
+    const fakeEvents = createPushableQueue<SDKMessage>();
+    controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));
+    await controller.start();
+    await flushMicrotasks();
+
+    const nudgePromise = controller.nudgeSkillRefresh(['esputnik-trigger-monitor']);
+    await vi.waitFor(() => expect(controller?.isBusy()).toBe(true));
+    fakeEvents.push(resultMessage('Got it — re-read the trigger-monitor skill.'));
+    await nudgePromise;
+
+    expect(sendTelegramReply).not.toHaveBeenCalled();
+    expect(controller.isBusy()).toBe(false);
+  });
+
   it('a task_notification while busy queues and runs only after the current job resolves', async () => {
     const fakeEvents = createPushableQueue<SDKMessage>();
     controller = createSessionController(cfg, trackedFakeQueryFn(fakeEvents));

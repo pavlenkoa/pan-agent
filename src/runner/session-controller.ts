@@ -89,6 +89,19 @@ export interface SessionController {
    */
   nudgePersonaRefresh(): Promise<void>;
   /**
+   * Same shape as `nudgePersonaRefresh` above, generalized to one or more
+   * shared skill files (see `skillChangedSinceLastAck`'s doc comment,
+   * sdk-session.ts, for why a resumed session needs this too) — a shared
+   * `.claude/skills/<name>/SKILL.md` getting reinstalled with new content on
+   * disk doesn't update a long-lived session's own memorized understanding
+   * of that skill's procedure on its own. `index.ts`'s `main()` calls this
+   * once at boot per boot (not once per changed skill) with every skill name
+   * that changed since last acknowledged, only when this is a resumed
+   * session. Never delivers whatever the model replies to Telegram — purely
+   * internal.
+   */
+  nudgeSkillRefresh(changedSkillNames: string[]): Promise<void>;
+  /**
    * One action whether `serverKey` is brand new to this session or a
    * renewal of one it already has wired up (from `Options.mcpServers` at
    * boot, or a previous call to this same method) — this is the decision
@@ -122,7 +135,7 @@ interface PendingReaction {
 
 interface Job {
   turnId: string;
-  trigger: 'http' | 'task_notification' | 'auto_compact' | 'persona_refresh';
+  trigger: 'http' | 'task_notification' | 'auto_compact' | 'persona_refresh' | 'skill_refresh';
   startedAt: number;
   resolve: (result: TurnResult) => void;
   reject: (err: unknown) => void;
@@ -413,6 +426,22 @@ ${noUpdateInstruction(
     }
   }
 
+  /** See `SessionController.nudgeSkillRefresh`'s doc comment for why this exists at all. */
+  async function nudgeSkillRefresh(changedSkillNames: string[]): Promise<void> {
+    const turnId = `skill-refresh:${Date.now()}`;
+    const paths = changedSkillNames.map((name) => `.claude/skills/${name}/SKILL.md`).join(', ');
+    const text = `[System note: the following shared skill file(s) were updated since this conversation started — a routine restart does not re-load them into your context on its own: ${paths}. Use the Read tool on each of them now so your understanding of their procedure is current. This is internal only, not a message from the person — do not reply to them about it.]`;
+    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
+    reactable.messageId = null; // synthetic push, not a real inbound message
+    try {
+      const result = await startJob('skill_refresh', turnId, message);
+      const { text: preview, bytes } = truncateText(result.replyText);
+      log.line('skill_refresh_acked', { person: cfg.slug, turn: turnId, skills: changedSkillNames, text: preview, bytes });
+    } catch (err) {
+      log.error('skill_refresh_failed', err, { person: cfg.slug, skills: changedSkillNames });
+    }
+  }
+
   /**
    * App-enforced ceiling, checked after every job — the SDK's own
    * `autoCompactThreshold` scales up near the model's full window (see
@@ -603,6 +632,7 @@ ${noUpdateInstruction(
       contextLimit = tokens;
     },
     nudgePersonaRefresh,
+    nudgeSkillRefresh,
     async syncMcpServer(serverKey: string, config: McpServerConfig): Promise<'added' | 'reconnected'> {
       if (!queryHandle) throw new Error('session not started yet');
       if (knownEsputnikKeys.has(serverKey)) {

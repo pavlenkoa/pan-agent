@@ -33,6 +33,7 @@ import {
   readSavedSessionId,
   resolveReplyText,
   saveContextLimit,
+  skillChangedSinceLastAck,
 } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
 
@@ -58,9 +59,21 @@ async function main(): Promise<void> {
   // prior conversation) — see personaChangedSinceLastAck's doc comment for
   // why a resumed session needs an explicit nudge to see this at all.
   const wasResuming = (await readSavedSessionId(cfg)) !== null;
-  await installPersonaFiles(cfg);
+  const { skillNames: installedSkillNames } = await installPersonaFiles(cfg);
   const installedPersona = await readFile(path.join(cfg.claudeHome, 'CLAUDE.md'), 'utf8').catch(() => '');
   const personaChanged = installedPersona ? await personaChangedSinceLastAck(cfg, installedPersona) : false;
+
+  // Same "resumed session won't pick this up on its own" problem as CLAUDE.md
+  // above, one shared SKILL.md at a time — see skillChangedSinceLastAck's doc
+  // comment (sdk-session.ts). Checked per skill so editing one shared skill
+  // doesn't spuriously ack every other one's hash too.
+  const changedSkillNames: string[] = [];
+  for (const skillName of installedSkillNames) {
+    const skillContent = await readFile(path.join(cfg.workspaceCwd, '.claude', 'skills', skillName, 'SKILL.md'), 'utf8').catch(() => '');
+    if (skillContent && (await skillChangedSinceLastAck(cfg, skillName, skillContent))) {
+      changedSkillNames.push(skillName);
+    }
+  }
 
   const controller = createSessionController(cfg);
   await controller.start();
@@ -71,8 +84,15 @@ async function main(): Promise<void> {
   // starts listening below, so no real turn can race in ahead of it.
   const savedContextLimit = await readSavedContextLimit(cfg);
   if (savedContextLimit != null) controller.setContextLimit(savedContextLimit);
-  if (wasResuming && personaChanged) {
-    void controller.nudgePersonaRefresh();
+  if (wasResuming && (personaChanged || changedSkillNames.length > 0)) {
+    // Sequenced (not two independent `void` calls) so the two nudges can never
+    // race each other onto the single-flight stream — startJob has no
+    // correlation id, it trusts "the next result answers what was just
+    // pushed." Still fire-and-forget from server.listen's perspective below.
+    void (async () => {
+      if (personaChanged) await controller.nudgePersonaRefresh();
+      if (changedSkillNames.length > 0) await controller.nudgeSkillRefresh(changedSkillNames);
+    })();
   }
 
   let busy = false;

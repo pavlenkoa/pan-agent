@@ -15,6 +15,7 @@ import {
   readSavedContextLimit,
   resolveReplyText,
   saveContextLimit,
+  skillChangedSinceLastAck,
 } from './sdk-session.js';
 
 describe('buildPrompt — ControlTurn', () => {
@@ -272,6 +273,62 @@ describe('personaChangedSinceLastAck', () => {
     await personaChangedSinceLastAck(cfg, 'content v1');
     await personaChangedSinceLastAck(cfg, 'content v2');
     expect(await personaChangedSinceLastAck(cfg, 'content v2')).toBe(false);
+  });
+});
+
+describe('skillChangedSinceLastAck', () => {
+  let dir: string;
+  let cfg: RunnerConfig;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-skill-hash-'));
+    cfg = {
+      slug: 'test',
+      chatId: 1,
+      tz: 'UTC',
+      port: 8080,
+      operatorTasksUrl: 'http://operator.invalid',
+      tasksToken: 'test-token',
+      telegramBotToken: 'bot-token',
+      journalDir: dir,
+      workspaceCwd: dir,
+      claudeHome: dir,
+      sessionIdFile: path.join(dir, 'session-id'),
+      customVarsDoc: [],
+    };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns true on the very first check for a skill, same conservative default as personaChangedSinceLastAck', async () => {
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v1')).toBe(true);
+  });
+
+  it('returns false when a skill\'s content is unchanged since the last check', async () => {
+    await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v1');
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v1')).toBe(false);
+  });
+
+  it('returns true when a skill\'s content changed since the last check', async () => {
+    await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v1');
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v2')).toBe(true);
+  });
+
+  it('only reports a given skill\'s change once — acknowledged immediately', async () => {
+    await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v1');
+    await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v2');
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'skill v2')).toBe(false);
+  });
+
+  it('tracks each skill name independently — changing one never acks another', async () => {
+    await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'monitor v1');
+    await skillChangedSinceLastAck(cfg, 'esputnik-query', 'query v1');
+    // Editing esputnik-trigger-monitor's content must not spuriously ack
+    // esputnik-query's own hash file too.
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-query', 'query v1')).toBe(false);
+    expect(await skillChangedSinceLastAck(cfg, 'esputnik-trigger-monitor', 'monitor v2')).toBe(true);
   });
 });
 
