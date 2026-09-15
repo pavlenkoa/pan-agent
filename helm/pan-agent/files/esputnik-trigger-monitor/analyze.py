@@ -104,19 +104,33 @@ def _read_rows(csv_path: Path) -> list[dict[str, str]]:
 
 def detect(
     baseline_csv: Path,
-    recent_csv: Path,
+    recent_csvs: list[Path],
     active_workflow_ids: set[int],
     config: dict[str, Any],
     today: date,
 ) -> dict[str, Any]:
     baseline_rows = _read_rows(baseline_csv)
-    recent_by_message: dict[str, float] = {}
-    for row in _read_rows(recent_csv):
-        mid = row["message_id"]
-        recent_by_message[mid] = recent_by_message.get(mid, 0.0) + float(row["delivered"] or 0)
+
+    # One aggregated message_id -> delivered map per day, kept separate rather
+    # than summed up front -- this is what lets a candidate be caught by "most
+    # of the individual days collapsed" even when a single strong day would
+    # otherwise average the whole window back to looking healthy. Confirmed
+    # live 2026-09-15: a real message (order 5 / заказ Доставляется) had two
+    # full zero days followed by one strong rebound day that alone pulled the
+    # blended 3-day average up to ~83% of baseline -- comfortably above the
+    # 15% threshold, and invisible to the old single-number comparison.
+    recent_by_day: list[dict[str, float]] = []
+    for day_csv in recent_csvs:
+        day_map: dict[str, float] = {}
+        for row in _read_rows(day_csv):
+            mid = row["message_id"]
+            day_map[mid] = day_map.get(mid, 0.0) + float(row["delivered"] or 0)
+        recent_by_day.append(day_map)
+
+    recent_window_days = len(recent_csvs)
+    majority_days = -(-recent_window_days // 2)  # ceil(N/2) -- 2 of 3, not just any 1
 
     baseline_window_days = config["baselineWindowDays"]
-    recent_window_days = config["recentWindowDays"]
     min_baseline_daily = config["minBaselineDailyDelivered"]
     drop_ratio_threshold = config["dropRatioThreshold"]
     known_cyclical: dict[str, Any] = config.get("knownCyclicalMessages", {})
@@ -154,11 +168,17 @@ def detect(
             skipped_low_volume.append(mid)
             continue
 
-        recent_delivered = recent_by_message.get(mid, 0.0)
-        recent_daily = recent_delivered / recent_window_days
+        daily_breakdown = [round(day_map.get(mid, 0.0), 2) for day_map in recent_by_day]
+        recent_delivered = sum(daily_breakdown)
+        recent_daily = recent_delivered / recent_window_days if recent_window_days else 0.0
         ratio = (recent_daily / baseline_daily) if baseline_daily > 0 else 0.0
 
-        if recent_daily > drop_ratio_threshold * baseline_daily:
+        collapse_threshold = drop_ratio_threshold * baseline_daily
+        days_collapsed = sum(1 for v in daily_breakdown if v <= collapse_threshold)
+        average_collapsed = recent_daily <= collapse_threshold
+        majority_collapsed = days_collapsed >= majority_days
+
+        if not (average_collapsed or majority_collapsed):
             continue  # healthy, not a candidate
 
         candidate: dict[str, Any] = {
@@ -171,6 +191,9 @@ def detect(
             "baselineDaily": round(baseline_daily, 2),
             "recentDaily": round(recent_daily, 2),
             "ratio": round(ratio, 4),
+            "dailyBreakdown": daily_breakdown,
+            "daysCollapsed": days_collapsed,
+            "recentWindowDays": recent_window_days,
         }
 
         cyclical_entry = known_cyclical.get(mid)
@@ -355,6 +378,90 @@ def history_read(history_dir: Path, account: str, since: date, until: date) -> l
 
 
 # --------------------------------------------------------------------------
+# daily volume history -- raw per-message, per-day `delivered`, persisted as a
+# free byproduct of the recent-window CSVs `detect` already fetches (no extra
+# eSputnik calls). Never read back in bulk: `daily_series` returns a bounded,
+# single-message slice meant to actually be looked at (a shape, not a number),
+# not the whole file -- an account can easily have 40+ active messages, and
+# printing all of them for every day would burn real tokens on an unattended,
+# automatic run for no reason.
+# --------------------------------------------------------------------------
+
+MAX_DAILY_SERIES_DAYS = 60
+
+
+def _daily_file(history_dir: Path, account: str, year_month: str) -> Path:
+    return history_dir / f"esputnik-monitor-daily-{account}-{year_month}.json"
+
+
+def daily_append(history_dir: Path, account: str, day_csv: Path, entry_date: date) -> Path:
+    """Aggregates one day's per-message delivered totals from a raw analytics CSV
+    (the same 1-day export the daily check's recent window already fetches) and
+    upserts them under that date's key in the account's monthly daily-volume
+    file. Re-appending the same date replaces its entry wholesale rather than
+    merging -- a retried daily check always reflects the latest fetch, never
+    double-counts."""
+    per_message: dict[str, float] = {}
+    for row in _read_rows(day_csv):
+        mid = row["message_id"]
+        per_message[mid] = per_message.get(mid, 0.0) + float(row["delivered"] or 0)
+    year_month = _fmt_date(entry_date)[:7]
+    path = _daily_file(history_dir, account, year_month)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, dict[str, float]] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    existing[_fmt_date(entry_date)] = per_message
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _read_daily_points(
+    history_dir: Path, account: str, message_id: str, since: date, until: date
+) -> list[tuple[date, float]]:
+    """(date, delivered) pairs for one message, only for dates a daily-append
+    entry actually exists for. A date with no entry at all (pod was down, or
+    predates this file existing) is real missing data and is skipped rather
+    than read as a zero day -- a message simply absent *within* a date that
+    does have an entry is a real zero (the underlying eSputnik export itself
+    omits zero-volume rows, confirmed live against real account data)."""
+    points: list[tuple[date, float]] = []
+    for year_month in _months_between(since, until):
+        path = _daily_file(history_dir, account, year_month)
+        if not path.exists():
+            continue
+        by_date: dict[str, dict[str, float]] = json.loads(path.read_text(encoding="utf-8"))
+        for date_str, per_message in by_date.items():
+            d = _parse_date(date_str)
+            if since <= d <= until:
+                points.append((d, per_message.get(message_id, 0.0)))
+    points.sort(key=lambda p: p[0])
+    return points
+
+
+def daily_series(history_dir: Path, account: str, message_id: str, until: date, days: int) -> dict[str, Any]:
+    """A compact, bounded {date, delivered} list for ONE message -- the one place
+    in this skill meant to actually be looked at (a shape, not a number), to
+    judge whether a candidate's gaps look like a genuine recurring cycle.
+    Bounded to MAX_DAILY_SERIES_DAYS and scoped to one message specifically so
+    this stays cheap even though the underlying file holds every message for
+    the whole account."""
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    if days > MAX_DAILY_SERIES_DAYS:
+        raise ValueError(
+            f"days={days} exceeds the cap of {MAX_DAILY_SERIES_DAYS} -- daily-series is for eyeballing a "
+            "recent window, not a bulk export; narrow the window instead"
+        )
+    since = until - timedelta(days=days - 1)
+    points = _read_daily_points(history_dir, account, message_id, since, until)
+    return {
+        "messageId": message_id,
+        "since": _fmt_date(since),
+        "until": _fmt_date(until),
+        "series": [{"date": _fmt_date(d), "delivered": round(v, 2)} for d, v in points],
+    }
+
+
+# --------------------------------------------------------------------------
 # one-time migration from the pre-rewrite state file shape
 # --------------------------------------------------------------------------
 
@@ -404,9 +511,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--column", required=True)
     p.add_argument("--filter", action="append", default=[], metavar="COLUMN=VALUE")
 
-    p = sub.add_parser("detect", help="Find flatline candidates from a baseline/recent CSV pair.")
+    p = sub.add_parser("detect", help="Find flatline candidates from a baseline CSV and one CSV per day of the recent window.")
     p.add_argument("--baseline", required=True, type=Path)
-    p.add_argument("--recent", required=True, type=Path)
+    p.add_argument(
+        "--recent",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="One CSV per day in the recent window (e.g. 3 separate 1-day exports), not one combined multi-day export.",
+    )
     p.add_argument("--active-workflows", required=True, type=Path, help="Raw list_workflows JSON response.")
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--today", required=True)
@@ -437,6 +550,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--until", required=False)
 
     p = sub.add_parser(
+        "daily-append",
+        help="Aggregate one day's per-message delivered totals from a CSV and upsert into that account's daily-volume history.",
+    )
+    p.add_argument("--history-dir", required=True, type=Path)
+    p.add_argument("--account", required=True)
+    p.add_argument("--csv", required=True, type=Path, help="A single day's get_messaging_analytics export.")
+    p.add_argument("--date", required=True, help="The calendar date this CSV's data belongs to (YYYY-MM-DD) -- not necessarily today.")
+
+    p = sub.add_parser(
+        "daily-series",
+        help="A compact {date, delivered} list for one message_id, bounded and scoped for eyeballing whether a candidate looks cyclical.",
+    )
+    p.add_argument("--history-dir", required=True, type=Path)
+    p.add_argument("--account", required=True)
+    p.add_argument("--message-id", required=True)
+    p.add_argument("--until", required=True)
+    p.add_argument("--days", type=int, default=21)
+
+    p = sub.add_parser(
         "migrate-legacy-state",
         help="One-time (idempotent): move a pre-rewrite state file's weekLog into monthly history files.",
     )
@@ -462,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = active_raw.get("data", active_raw) if isinstance(active_raw, dict) else active_raw
         active_ids = {int(r["id"]) for r in rows if r.get("status") == "active"}
         config = load_config(args.config)
-        result = detect(args.baseline, args.recent, active_ids, config, _parse_date(args.today))
+        result = detect(args.baseline, list(args.recent), active_ids, config, _parse_date(args.today))
         _print_json(result)
         return 0
 
@@ -494,6 +626,16 @@ def main(argv: list[str] | None = None) -> int:
         until = _parse_date(args.until) if args.until else date.today()
         entries = history_read(args.history_dir, args.account, since, until)
         _print_json({"entries": entries})
+        return 0
+
+    if args.command == "daily-append":
+        path = daily_append(args.history_dir, args.account, args.csv, _parse_date(args.date))
+        _print_json({"wrote": str(path), "date": args.date})
+        return 0
+
+    if args.command == "daily-series":
+        result = daily_series(args.history_dir, args.account, args.message_id, _parse_date(args.until), args.days)
+        _print_json(result)
         return 0
 
     if args.command == "migrate-legacy-state":

@@ -112,17 +112,20 @@ class DetectTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def run_detect(self, baseline_rows, recent_rows, active_ids, config=None):
+    def run_detect(self, baseline_rows, recent_rows_per_day, active_ids, config=None):
         baseline = self.dir / "baseline.csv"
-        recent = self.dir / "recent.csv"
         write_csv(baseline, baseline_rows)
-        write_csv(recent, recent_rows)
-        return analyze.detect(baseline, recent, active_ids, config or self.config, self.today)
+        recent_paths = []
+        for i, rows in enumerate(recent_rows_per_day):
+            p = self.dir / f"recent-day{i}.csv"
+            write_csv(p, rows)
+            recent_paths.append(p)
+        return analyze.detect(baseline, recent_paths, active_ids, config or self.config, self.today)
 
     def test_healthy_campaign_not_flagged(self) -> None:
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],  # 100/day baseline
-            [base_row(delivered=str(3 * 90))],  # 90/day recent — well above 15% of baseline
+            [[base_row(delivered="90")], [base_row(delivered="90")], [base_row(delivered="90")]],  # 90/day recent — well above 15% of baseline
             {446206},
         )
         self.assertEqual(result["candidates"], [])
@@ -130,7 +133,7 @@ class DetectTests(unittest.TestCase):
     def test_flatlined_campaign_is_flagged(self) -> None:
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],
-            [base_row(delivered="0")],
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="0")]],
             {446206},
         )
         self.assertEqual(len(result["candidates"]), 1)
@@ -138,6 +141,9 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(c["messageId"], "4500055")
         self.assertEqual(c["baselineDaily"], 100.0)
         self.assertEqual(c["recentDaily"], 0.0)
+        self.assertEqual(c["dailyBreakdown"], [0.0, 0.0, 0.0])
+        self.assertEqual(c["daysCollapsed"], 3)
+        self.assertEqual(c["recentWindowDays"], 3)
         self.assertIsNone(c["cyclicalMatch"])
 
     def test_message_missing_entirely_from_recent_window_counts_as_zero(self) -> None:
@@ -145,7 +151,7 @@ class DetectTests(unittest.TestCase):
         # doesn't appear in the recent export at all, not a zero-valued row.
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],
-            [],
+            [[], [], []],
             {446206},
         )
         self.assertEqual(len(result["candidates"]), 1)
@@ -155,7 +161,7 @@ class DetectTests(unittest.TestCase):
         # 36 days * 10/day = 360 total, baselineDaily = 10 < MIN_BASELINE_DAILY_DELIVERED (15)
         result = self.run_detect(
             [base_row(delivered="360")],
-            [base_row(delivered="0")],
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="0")]],
             {446206},
         )
         self.assertEqual(result["candidates"], [])
@@ -164,7 +170,7 @@ class DetectTests(unittest.TestCase):
     def test_inactive_workflow_never_flagged_even_if_flatlined(self) -> None:
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],
-            [base_row(delivered="0")],
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="0")]],
             set(),  # workflow 446206 not in the active set
         )
         self.assertEqual(result["candidates"], [])
@@ -172,12 +178,13 @@ class DetectTests(unittest.TestCase):
 
     def test_borderline_exactly_at_threshold_is_flagged(self) -> None:
         # recent_daily == threshold * baseline_daily should still count (skill
-        # says "<=", not "<").
+        # says "<=", not "<"). All three days identical, so the average and
+        # majority-of-days checks agree.
         baseline_daily = 100.0
         recent_daily = 0.15 * baseline_daily  # exactly at DROP_RATIO_THRESHOLD
         result = self.run_detect(
             [base_row(delivered=str(36 * baseline_daily))],
-            [base_row(delivered=str(3 * recent_daily))],
+            [[base_row(delivered=str(recent_daily))]] * 3,
             {446206},
         )
         self.assertEqual(len(result["candidates"]), 1)
@@ -187,7 +194,7 @@ class DetectTests(unittest.TestCase):
         recent_daily = 0.16 * baseline_daily
         result = self.run_detect(
             [base_row(delivered=str(36 * baseline_daily))],
-            [base_row(delivered=str(3 * recent_daily))],
+            [[base_row(delivered=str(recent_daily))]] * 3,
             {446206},
         )
         self.assertEqual(result["candidates"], [])
@@ -196,19 +203,47 @@ class DetectTests(unittest.TestCase):
         # Seen live: the same message_id can appear more than once in an export.
         result = self.run_detect(
             [base_row(delivered=str(36 * 60)), base_row(delivered=str(36 * 40))],
-            [base_row(delivered="0")],
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="0")]],
             {446206},
         )
         self.assertEqual(len(result["candidates"]), 1)
         self.assertEqual(result["candidates"][0]["baselineDaily"], 100.0)
 
-    def test_multiple_recent_rows_for_same_message_are_summed(self) -> None:
+    def test_multiple_recent_rows_for_same_message_on_the_same_day_are_summed(self) -> None:
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],
-            [base_row(delivered="1"), base_row(delivered="1")],
+            [[base_row(delivered="1"), base_row(delivered="1")]],
             {446206},
         )
         self.assertEqual(result["candidates"][0]["recentDelivered"], 2.0)
+
+    def test_single_bad_day_among_three_does_not_flag_a_healthy_average(self) -> None:
+        # One noisy zero day out of three, but the average is nowhere near the
+        # threshold and only 1 of 3 days individually collapsed (< majority of 2)
+        # -- must not flag on the strength of that lone day alone.
+        result = self.run_detect(
+            [base_row(delivered=str(36 * 100))],  # baselineDaily = 100
+            [[base_row(delivered="0")], [base_row(delivered="100")], [base_row(delivered="100")]],
+            {446206},
+        )
+        self.assertEqual(result["candidates"], [])
+
+    def test_majority_of_days_collapsed_flags_even_when_average_recovers(self) -> None:
+        # The real order-5 shape confirmed live 2026-09-15: two full zero days
+        # then one strong rebound day. The blended average (266.7/400 = 66.7%)
+        # is comfortably above the 15% threshold and would be invisible to the
+        # old single-number check -- but 2 of 3 days individually collapsed,
+        # which is what must catch it.
+        result = self.run_detect(
+            [base_row(delivered=str(36 * 400))],  # baselineDaily = 400
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="800")]],
+            {446206},
+        )
+        self.assertEqual(len(result["candidates"]), 1)
+        c = result["candidates"][0]
+        self.assertEqual(c["daysCollapsed"], 2)
+        self.assertEqual(c["dailyBreakdown"], [0.0, 0.0, 800.0])
+        self.assertGreater(c["ratio"], 0.15)  # average alone would have looked healthy
 
     def test_known_cyclical_message_gets_a_verify_window_not_silent_suppression(self) -> None:
         config = dict(self.config)
@@ -224,7 +259,7 @@ class DetectTests(unittest.TestCase):
         }
         result = self.run_detect(
             [base_row(delivered=str(36 * 100))],
-            [base_row(delivered="0")],
+            [[base_row(delivered="0")], [base_row(delivered="0")], [base_row(delivered="0")]],
             {446206},
             config=config,
         )
@@ -242,8 +277,9 @@ class DetectTests(unittest.TestCase):
                 base_row(message_id="BBB", delivered=str(36 * 200)),
             ],
             [
-                base_row(message_id="AAA", delivered=str(3 * 10)),  # ratio 0.10
-                base_row(message_id="BBB", delivered=str(3 * 1)),  # ratio 0.005
+                [base_row(message_id="AAA", delivered="10"), base_row(message_id="BBB", delivered="1")],
+                [base_row(message_id="AAA", delivered="10"), base_row(message_id="BBB", delivered="1")],
+                [base_row(message_id="AAA", delivered="10"), base_row(message_id="BBB", delivered="1")],
             ],
             {446206},
         )
@@ -403,6 +439,103 @@ class HistoryTests(unittest.TestCase):
         b_entries = analyze.history_read(self.dir, "acc-b", since=date(2026, 9, 1), until=date(2026, 9, 30))
         self.assertEqual([e["type"] for e in a_entries], ["a"])
         self.assertEqual([e["type"] for e in b_entries], ["b"])
+
+
+class DailyVolumeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def append_day(self, account: str, entry_date: date, rows: list[dict[str, str]]) -> Path:
+        csv_path = self.dir / f"day-{account}-{entry_date.isoformat()}.csv"
+        write_csv(csv_path, rows)
+        return analyze.daily_append(self.dir, account, csv_path, entry_date)
+
+    def test_append_creates_month_file_keyed_by_date(self) -> None:
+        path = self.append_day("acc", date(2026, 9, 14), [base_row(delivered="20")])
+        self.assertEqual(path.name, "esputnik-monitor-daily-acc-2026-09.json")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data, {"2026-09-14": {"4500055": 20.0}})
+
+    def test_duplicate_rows_for_same_message_are_summed(self) -> None:
+        path = self.append_day("acc", date(2026, 9, 14), [base_row(delivered="20"), base_row(delivered="5")])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["2026-09-14"]["4500055"], 25.0)
+
+    def test_re_appending_same_date_replaces_not_accumulates(self) -> None:
+        # A retried daily check re-fetching the same day must overwrite, not double-count.
+        self.append_day("acc", date(2026, 9, 14), [base_row(delivered="20")])
+        path = self.append_day("acc", date(2026, 9, 14), [base_row(delivered="99")])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["2026-09-14"]["4500055"], 99.0)
+
+    def test_different_dates_coexist_in_the_same_month_file(self) -> None:
+        self.append_day("acc", date(2026, 9, 13), [base_row(delivered="10")])
+        path = self.append_day("acc", date(2026, 9, 14), [base_row(delivered="20")])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(set(data.keys()), {"2026-09-13", "2026-09-14"})
+
+    def test_dates_spanning_a_month_boundary_land_in_their_own_files(self) -> None:
+        self.append_day("acc", date(2026, 8, 31), [base_row(delivered="10")])
+        self.append_day("acc", date(2026, 9, 1), [base_row(delivered="20")])
+        self.assertTrue((self.dir / "esputnik-monitor-daily-acc-2026-08.json").exists())
+        self.assertTrue((self.dir / "esputnik-monitor-daily-acc-2026-09.json").exists())
+
+    def test_two_accounts_never_share_a_daily_file(self) -> None:
+        self.append_day("acc-a", date(2026, 9, 14), [base_row(delivered="10")])
+        self.append_day("acc-b", date(2026, 9, 14), [base_row(delivered="99")])
+        a = analyze.daily_series(self.dir, "acc-a", "4500055", until=date(2026, 9, 14), days=5)
+        b = analyze.daily_series(self.dir, "acc-b", "4500055", until=date(2026, 9, 14), days=5)
+        self.assertEqual([p["delivered"] for p in a["series"]], [10.0])
+        self.assertEqual([p["delivered"] for p in b["series"]], [99.0])
+
+    def test_series_returns_compact_date_delivered_pairs_sorted_chronologically(self) -> None:
+        self.append_day("acc", date(2026, 9, 14), [base_row(delivered="30")])
+        self.append_day("acc", date(2026, 9, 12), [base_row(delivered="10")])
+        result = analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 14), days=21)
+        self.assertEqual(
+            result["series"],
+            [
+                {"date": "2026-09-12", "delivered": 10.0},
+                {"date": "2026-09-14", "delivered": 30.0},
+            ],
+        )
+
+    def test_series_only_covers_the_requested_window(self) -> None:
+        self.append_day("acc", date(2026, 8, 1), [base_row(delivered="999")])  # outside a 5-day window
+        self.append_day("acc", date(2026, 9, 14), [base_row(delivered="30")])
+        result = analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 14), days=5)
+        self.assertEqual(result["since"], "2026-09-10")
+        self.assertEqual(len(result["series"]), 1)
+
+    def test_missing_day_is_absent_from_the_series_not_zero(self) -> None:
+        # Pod was down 2026-09-12 -- daily-append never ran that day. It must be
+        # absent from the series entirely, not silently shown as a 0 that would
+        # misread as part of a real cyclical gap.
+        self.append_day("acc", date(2026, 9, 11), [base_row(delivered="40")])
+        self.append_day("acc", date(2026, 9, 13), [base_row(delivered="40")])
+        result = analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 13), days=5)
+        dates = [p["date"] for p in result["series"]]
+        self.assertEqual(dates, ["2026-09-11", "2026-09-13"])
+
+    def test_message_absent_from_a_present_day_counts_as_zero(self) -> None:
+        # The day itself WAS checked (an entry exists) but this specific message
+        # sent nothing -- eSputnik's own export omits zero-volume rows, so
+        # absence-within-a-present-day is a real zero, not missing data.
+        self.append_day("acc", date(2026, 9, 14), [base_row(message_id="other-message", delivered="40")])
+        result = analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 14), days=5)
+        self.assertEqual(result["series"], [{"date": "2026-09-14", "delivered": 0.0}])
+
+    def test_series_rejects_a_window_wider_than_the_cap(self) -> None:
+        with self.assertRaises(ValueError):
+            analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 14), days=analyze.MAX_DAILY_SERIES_DAYS + 1)
+
+    def test_series_accepts_exactly_the_cap(self) -> None:
+        result = analyze.daily_series(self.dir, "acc", "4500055", until=date(2026, 9, 14), days=analyze.MAX_DAILY_SERIES_DAYS)
+        self.assertEqual(result["series"], [])  # no data yet, but no error
 
 
 class MigrateLegacyStateTests(unittest.TestCase):
@@ -595,6 +728,65 @@ class CliEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(len(out["candidates"]), 1)
         self.assertEqual(out["candidates"][0]["messageId"], "4500055")
+
+    def test_detect_via_cli_with_multiple_daily_recent_csvs(self) -> None:
+        baseline = self.dir / "baseline.csv"
+        recent1 = self.dir / "recent1.csv"
+        recent2 = self.dir / "recent2.csv"
+        recent3 = self.dir / "recent3.csv"
+        workflows = self.dir / "workflows.json"
+        config = self.dir / "config.json"
+        write_csv(baseline, [base_row(delivered=str(36 * 100))])
+        write_csv(recent1, [base_row(delivered="0")])
+        write_csv(recent2, [base_row(delivered="0")])
+        write_csv(recent3, [base_row(delivered="0")])
+        workflows.write_text(json.dumps({"data": [{"id": 446206, "name": "user_birthday", "status": "active"}]}))
+        config.write_text(json.dumps(analyze.DEFAULT_CONFIG))
+
+        out = self.run_cli(
+            "detect",
+            "--baseline",
+            str(baseline),
+            "--recent",
+            str(recent1),
+            str(recent2),
+            str(recent3),
+            "--active-workflows",
+            str(workflows),
+            "--config",
+            str(config),
+            "--today",
+            "2026-09-14",
+        )
+        self.assertEqual(len(out["candidates"]), 1)
+        self.assertEqual(out["candidates"][0]["recentWindowDays"], 3)
+        self.assertEqual(out["candidates"][0]["daysCollapsed"], 3)
+
+    def test_daily_append_then_series_via_cli(self) -> None:
+        history_dir = self.dir / "history"
+        day1 = self.dir / "day1.csv"
+        day2 = self.dir / "day2.csv"
+        write_csv(day1, [base_row(delivered="20")])
+        write_csv(day2, [base_row(delivered="30")])
+        self.run_cli(
+            "daily-append", "--history-dir", str(history_dir), "--account", "acc",
+            "--csv", str(day1), "--date", "2026-09-13",
+        )
+        self.run_cli(
+            "daily-append", "--history-dir", str(history_dir), "--account", "acc",
+            "--csv", str(day2), "--date", "2026-09-14",
+        )
+        series = self.run_cli(
+            "daily-series", "--history-dir", str(history_dir), "--account", "acc",
+            "--message-id", "4500055", "--until", "2026-09-14", "--days", "21",
+        )
+        self.assertEqual(
+            series["series"],
+            [
+                {"date": "2026-09-13", "delivered": 20.0},
+                {"date": "2026-09-14", "delivered": 30.0},
+            ],
+        )
 
     def test_narrow_drop_date_via_cli(self) -> None:
         windows_path = self.dir / "windows.json"
