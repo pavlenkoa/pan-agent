@@ -163,10 +163,10 @@ data:
     **Rules:**
     - For ls/cat/find/grep — use `/media/*` (you run as user `claude`, have NFS read/write there)
     - qBittorrent has a **category** pre-configured for each of the four dirs (`movies`, `tv`,
-      `animation`, `tvanimation`) — pass `category=<name>` when adding a torrent, not a raw
-      `savepath`. qBittorrent's pod has no `/media` mount, so a raw path would need `/downloads/*`
-      anyway — the category is just cleaner and is what makes torrents show up correctly grouped
-      in qui and Grafana.
+      `animation`, `tvanimation`) — when adding a torrent ALWAYS pass BOTH `category=<name>` AND
+      `savepath=/downloads/<name>`. Auto torrent management is off, so the category alone does NOT
+      set the save path: the torrent falls back to `/downloads` (root-owned, not writable) and
+      errors with "Permission denied". The category is what groups torrents in qui and Grafana.
 
     The four valid content dirs: `movies`, `tv`, `animation`, `tvanimation`. NEVER invent paths like `anime` — there's no `/media/anime` or `/downloads/anime`.
 
@@ -398,9 +398,13 @@ data:
     | `animation` | `/downloads/animation` | Animated movies |
     | `tvanimation` | `/downloads/tvanimation` | Animated series |
 
-    Always pass `category=<name>` when adding a torrent — that's what puts the files in the right
-    place AND is what makes qui and the Grafana dashboard group things correctly. Don't pass a raw
-    `savepath` instead.
+    Always pass BOTH `category=<name>` (groups things in qui and the Grafana dashboard) AND
+    `savepath=<Save path from the table>` when adding a torrent. Auto torrent management is off, so
+    the category alone does not set the path — without `savepath` the torrent lands in `/downloads`,
+    which isn't writable, and errors with "Permission denied". After adding, verify with
+    `torrents/info` that `save_path` is `/downloads/<name>`, not `/downloads`.
+    If a torrent is already stuck that way, fix it with `torrents/setLocation`
+    (`hashes=<HASH>`, `location=/downloads/<name>`) and then `torrents/start`.
 
     ### Tags — who's interested
     Comma-separated, multiple per torrent. Convention:
@@ -424,6 +428,7 @@ data:
     curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/add \
       -F "torrents=@/tmp/movie.torrent" \
       -F "category=movies" \
+      -F "savepath=/downloads/movies" \
       -F "tags=requested-by:andrii"
     ```
     Response body is `Ok.` on success — it does **not** return the torrent's hash. Get that with:
@@ -437,6 +442,7 @@ data:
     curl -s -X POST http://qbittorrent.qbittorrent.svc:9091/api/v2/torrents/add \
       -F "urls=$DOWNLOAD_LINK" \
       -F "category=movies" \
+      -F "savepath=/downloads/movies" \
       -F "tags=requested-by:andrii"
     ```
     qBittorrent fetches the .torrent itself — no need to download it first for this flow.
