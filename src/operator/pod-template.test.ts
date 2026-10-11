@@ -78,6 +78,13 @@ describe('buildPersonPodSpec — context limit', () => {
   });
 });
 
+describe('buildPersonPodSpec — default model', () => {
+  it('passes the operator default model through as PERSON_DEFAULT_MODEL', () => {
+    const pod = buildPersonPodSpec({ ...cfg, defaultModel: 'claude-sonnet-5-5' }, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).get('PERSON_DEFAULT_MODEL')).toBe('claude-sonnet-5-5');
+  });
+});
+
 describe('buildPersonPodSpec — tool permissions', () => {
   it('seeds PERSON_TOOL_PERMISSIONS with the granted tool names only, never the grant value', () => {
     const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token', {}, { 'mcp__esputnik-work__create_email_message': 'always_allow' });

@@ -99,6 +99,13 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
 // missing.
 export const DEFAULT_CONTEXT_LIMIT = 250_000;
 
+/** One selectable model, from the SDK's live `supportedModels()` — `id` is what `/model <id>` accepts and `setModel()` is given (the SDK's `resolvedModel` when it has one, else its `value`). */
+export interface ModelChoice {
+  id: string;
+  displayName: string;
+  description: string;
+}
+
 export interface ContextUsageSummary {
   model: string;
   totalTokens: number;
@@ -128,6 +135,9 @@ export type ControlRequest =
   | { action: 'context' }
   | { action: 'set_effort'; level: EffortLevel }
   | { action: 'set_context_limit'; tokens: number }
+  | { action: 'list_models' }
+  /** `model: null` resets to the pod's default (PERSON_DEFAULT_MODEL) and clears the saved override. */
+  | { action: 'set_model'; model: string | null }
   /**
    * One action whether `serverKey` is brand-new to this session or a
    * renewal of one it already has wired up — the runner (session-controller.ts),
@@ -152,6 +162,8 @@ export type ControlResponse =
   | { ok: true; action: 'context'; context: ContextUsageSummary }
   | { ok: true; action: 'set_effort' }
   | { ok: true; action: 'set_context_limit' }
+  | { ok: true; action: 'list_models'; models: ModelChoice[]; defaultModel: string; currentModel: string }
+  | { ok: true; action: 'set_model'; model: string }
   | { ok: true; action: 'sync_esputnik_mcp'; mode: 'added' | 'reconnected' }
   | { ok: true; action: 'esputnik_status'; servers: EsputnikServerStatus[] }
   /**

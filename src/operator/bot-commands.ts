@@ -35,6 +35,7 @@ export const PERSON_COMMANDS: BotCommand[] = [
   { command: 'sticker_packs', description: 'List sticker packs the assistant can send from (send a sticker to add one)' },
   { command: 'forget_sticker_pack', description: 'Remove one sticker pack by name (see /sticker_packs)' },
   { command: 'context', description: 'Show current context/token usage for your session' },
+  { command: 'model', description: 'Show or switch the model for your session (/model default to reset)' },
   { command: 'effort', description: 'Show or set model effort for this session: low|medium|high|xhigh' },
   { command: 'context_limit', description: 'Show or set your auto-compact token limit (default 250,000)' },
   { command: 'compact', description: 'Manually compact your conversation history now' },

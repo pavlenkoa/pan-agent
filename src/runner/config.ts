@@ -54,10 +54,17 @@ export interface RunnerConfig {
   contextLimit: number;
   /** NFS-persisted /context_limit override — same durability pattern as sessionIdFile (survives an in-place container restart, unlike the env var above, which is fixed at Pod creation). */
   contextLimitFile: string;
+  /** The operator's configured default model (PERSON_DEFAULT_MODEL) — what `/model default` resets to. */
+  defaultModel: string;
+  /** The model the session's `query()` is started with. Starts as `defaultModel`; main() overrides it from the NFS-saved `/model` choice (modelFile) before the controller starts. */
+  model: string;
+  /** NFS-persisted `/model` override — same durability pattern as contextLimitFile (an env var is fixed at Pod creation, so it can't carry a change across an in-place container restart). */
+  modelFile: string;
 }
 
 export function loadRunnerConfig(): RunnerConfig {
   const claudeHome = process.env['CLAUDE_HOME'] ?? '/home/claude/.claude';
+  const defaultModel = requireEnv('PERSON_DEFAULT_MODEL');
   return {
     slug: requireEnv('PERSON_SLUG'),
     chatId: Number(requireEnv('PERSON_CHAT_ID')),
@@ -74,5 +81,8 @@ export function loadRunnerConfig(): RunnerConfig {
     toolPermissions: parseToolPermissions(process.env['PERSON_TOOL_PERMISSIONS']),
     contextLimit: Number(process.env['PERSON_CONTEXT_LIMIT'] ?? DEFAULT_CONTEXT_LIMIT),
     contextLimitFile: process.env['CONTEXT_LIMIT_FILE'] ?? `${claudeHome}/pan-agent-context-limit`,
+    defaultModel,
+    model: defaultModel,
+    modelFile: process.env['MODEL_FILE'] ?? `${claudeHome}/pan-agent-model`,
   };
 }

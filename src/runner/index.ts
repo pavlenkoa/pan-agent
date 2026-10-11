@@ -29,10 +29,13 @@ import { createSessionController } from './session-controller.js';
 import {
   esputnikToolPolicy,
   personaChangedSinceLastAck,
+  clearSavedModel,
   readSavedContextLimit,
+  readSavedModel,
   readSavedSessionId,
   resolveReplyText,
   saveContextLimit,
+  saveModel,
   skillChangedSinceLastAck,
 } from './sdk-session.js';
 import { sendTelegramReply } from './telegram-send.js';
@@ -74,6 +77,12 @@ async function main(): Promise<void> {
       changedSkillNames.push(skillName);
     }
   }
+
+  // The person's saved /model choice (if any) must be in place before the
+  // controller starts, since the model is fixed into the query options at
+  // start — unlike the context limit below, which is applied afterward.
+  const savedModel = await readSavedModel(cfg);
+  if (savedModel) cfg.model = savedModel;
 
   const controller = createSessionController(cfg);
   await controller.start();
@@ -217,6 +226,13 @@ async function main(): Promise<void> {
         controller.setContextLimit(body.tokens);
         await saveContextLimit(cfg, body.tokens);
         response = { ok: true, action: 'set_context_limit' };
+      } else if (body.action === 'list_models') {
+        response = { ok: true, action: 'list_models', ...(await controller.listModels()) };
+      } else if (body.action === 'set_model') {
+        const applied = await controller.setModel(body.model);
+        if (body.model === null) await clearSavedModel(cfg);
+        else await saveModel(cfg, applied);
+        response = { ok: true, action: 'set_model', model: applied };
       } else if (body.action === 'sync_esputnik_mcp') {
         const mode = await controller.syncMcpServer(body.serverKey, {
           type: 'http',

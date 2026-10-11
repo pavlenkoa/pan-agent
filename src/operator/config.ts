@@ -53,6 +53,8 @@ export interface OperatorConfig {
   /** Person slugs who get highContextLimit instead of defaultContextLimit — a deliberately small, explicit allowlist (heavier/longer-running usage), not a per-person self-service setting. */
   highContextLimitSlugs: string[];
   highContextLimit: number;
+  /** The model every person pod runs absent their own /model choice (PERSON_DEFAULT_MODEL in the pod). Bumping this plus a pod restart moves everyone who hasn't picked one. */
+  defaultModel: string;
 }
 
 export function loadOperatorConfig(): OperatorConfig {
@@ -80,5 +82,6 @@ export function loadOperatorConfig(): OperatorConfig {
     defaultContextLimit: Number(process.env['DEFAULT_CONTEXT_LIMIT'] ?? 400_000),
     highContextLimitSlugs: parseSlugList(process.env['HIGH_CONTEXT_LIMIT_SLUGS']),
     highContextLimit: Number(process.env['HIGH_CONTEXT_LIMIT'] ?? 700_000),
+    defaultModel: requireEnv('DEFAULT_MODEL'),
   };
 }

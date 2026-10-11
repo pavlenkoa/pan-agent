@@ -31,6 +31,7 @@ import {
   listStickerPacks,
   removeStickerPack,
 } from './nfs.js';
+import { findModel, selectableModels } from './model-choice.js';
 import { postControl } from './pod-control.js';
 import { readPersonState, removeCustomEnvVar, removeEsputnikConnection, removeToolPermission, setCustomEnvVar } from './person-state.js';
 import { recreatePod } from './pod-lifecycle.js';
@@ -122,6 +123,9 @@ export async function tryHandlePersonCommand(
       return true;
     case '/effort':
       await handleEffort(deps, slug, person, args);
+      return true;
+    case '/model':
+      await handleModel(deps, slug, person, args, updateId);
       return true;
     case '/context_limit':
       await handleContextLimit(deps, slug, person, args);
@@ -468,7 +472,7 @@ async function handleContext(deps: RouterDeps, slug: string, person: PersonIndex
   const c = result.context;
   const pct = ((c.totalTokens / c.maxTokens) * 100).toFixed(1);
   const lines = [
-    `Model: ${c.model}`,
+    `Model: ${c.model} (change with /model)`,
     `Effort: ${c.effortLevel}`,
     `Context: ${c.totalTokens.toLocaleString()} / ${c.maxTokens.toLocaleString()} tokens (${pct}%)`,
     `Your limit: ${c.contextLimit.toLocaleString()} tokens — auto-compacts here (change with /context_limit <n>)`,
@@ -509,6 +513,65 @@ async function handleEffort(deps: RouterDeps, slug: string, person: PersonIndexE
     person.chatId,
     `Effort level set to ${level} for this session (resets to medium if your pod restarts).`,
   );
+}
+
+async function handleModel(
+  deps: RouterDeps,
+  slug: string,
+  person: PersonIndexEntry,
+  args: string[],
+  updateId: number,
+): Promise<void> {
+  const unreachable = "Couldn't reach your session right now — try again in a moment.";
+  const listed = await postControl(deps.api, deps.cfg, slug, { action: 'list_models' });
+  if (!listed) {
+    await deps.telegram.sendMessage(person.chatId, unreachable);
+    return;
+  }
+  if (!listed.ok || listed.action !== 'list_models') {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't list models: ${!listed.ok ? listed.error : 'unexpected response'}`);
+    return;
+  }
+  const isAdmin = person.telegramUserId === deps.cfg.telegramAdminChatId;
+  const choices = selectableModels(listed.models, isAdmin);
+  const [query] = args;
+
+  if (!query) {
+    const lines = choices.map(
+      (m) => `${m.id === listed.currentModel ? '▶' : '•'} ${m.id} — ${m.displayName}${m.id === listed.defaultModel ? ' (default)' : ''}`,
+    );
+    await deps.telegram.sendMessage(
+      person.chatId,
+      [`Current model: ${listed.currentModel}`, '', ...lines, '', 'Usage: /model <id> — or /model default'].join('\n'),
+    );
+    return;
+  }
+
+  const resetting = query.toLowerCase() === 'default';
+  const target = resetting ? null : findModel(choices, query);
+  if (!resetting && !target) {
+    await deps.telegram.sendMessage(
+      person.chatId,
+      `"${query}" isn't an available model for you. Available: ${choices.map((m) => m.id).join(', ') || 'none'}.`,
+    );
+    return;
+  }
+  const result = await postControl(deps.api, deps.cfg, slug, { action: 'set_model', model: target ? target.id : null });
+  if (!result) {
+    await deps.telegram.sendMessage(person.chatId, unreachable);
+    return;
+  }
+  if (!result.ok || result.action !== 'set_model') {
+    await deps.telegram.sendMessage(person.chatId, `Couldn't set model: ${!result.ok ? result.error : 'unexpected response'}`);
+    return;
+  }
+  await deps.telegram.sendMessage(
+    person.chatId,
+    resetting
+      ? `Back on the default model (${result.model}) — stays across pod restarts.`
+      : `Model set to ${result.model} — takes effect from your next message and stays across pod restarts. Your conversation history carries over.`,
+  );
+  notifyModel(deps, slug, person, updateId, `The person just switched your model to ${result.model}${resetting ? ' (the default)' : ''}.`);
 }
 
 const MIN_CONTEXT_LIMIT = 10_000;

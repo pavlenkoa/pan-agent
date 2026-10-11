@@ -59,6 +59,8 @@ spec:
               value: {{ .Values.operator.publicCallbackHost | quote }}
             - name: DEFAULT_TZ
               value: {{ .Values.defaultTz | quote }}
+            - name: DEFAULT_MODEL
+              value: {{ .Values.operator.defaultModel | quote }}
             - name: DEFAULT_CONTEXT_LIMIT
               value: {{ .Values.operator.contextLimits.default | quote }}
             - name: HIGH_CONTEXT_LIMIT

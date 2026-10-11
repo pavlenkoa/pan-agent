@@ -32,6 +32,10 @@ operator:
   # explicit allowlist for heavier/longer-running usage, not self-service —
   # environment-specific person slugs belong in the deploying cluster's
   # values file (e.g. homelab's), not here.
+  # Model every person pod runs absent their own /model choice. Bump this
+  # (and restart the person pods) to move everyone who hasn't picked one;
+  # non-admin people can only /model-switch among Sonnet models.
+  defaultModel: claude-sonnet-5-5
   contextLimits:
     default: 400000
     high: 700000

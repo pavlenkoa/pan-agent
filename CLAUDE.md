@@ -250,6 +250,20 @@ stdout to your log backend picks it up like any other pod.
   the value is low relative to the mocking cost. Plain-filesystem code
   (`journal.ts`, `nfs.ts`'s memory-file functions) *is* tested, against a
   real temp directory — no k8s dependency, so no reason not to.
+- **Model selection (`/model`).** The model is never hardcoded: the operator's
+  `defaultModel` (Helm `operator.defaultModel` -> `DEFAULT_MODEL` ->
+  `PERSON_DEFAULT_MODEL` in the pod; required on both sides, no code fallback, so
+  Helm is the only place the id lives) is what everyone runs absent a choice, and a
+  person's `/model` choice is an NFS file (`pan-agent-model`, same pattern as
+  `/context_limit` — an env var can't survive an in-place container restart) that
+  wins over it at boot. The selectable list is live from the SDK's
+  `supportedModels()` via `/control`'s `list_models`; the policy lives
+  operator-side in `model-choice.ts` (non-admins: Sonnet models only; admin: all).
+  Switching is `Query.setModel()` on the live session. Per the SDK's own docs this
+  keeps the same session/transcript, but that has not been verified live, and the
+  prompt cache is per-model so the first turn after a switch re-reads context
+  uncached. To move everyone to a new Sonnet: bump `operator.defaultModel` and
+  recreate the person pods (anyone with their own `/model` choice keeps it).
 - **Circular imports.** `admin-commands.ts` → `provisioning.ts` already
   exists (for `/approve`). Anything both `provisioning.ts` and
   `admin-commands.ts` need (e.g. the bot-command lists) goes in a

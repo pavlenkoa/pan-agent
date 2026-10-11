@@ -8,13 +8,17 @@ import { turnKey } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
   buildPrompt,
+  clearSavedModel,
   isEsputnikWriteTool,
   NO_UPDATE_MARKER,
   personaChangedSinceLastAck,
   readEsputnikMcpServers,
   readSavedContextLimit,
+  readSavedModel,
   resolveReplyText,
   saveContextLimit,
+  saveModel,
+  toModelChoices,
   skillChangedSinceLastAck,
 } from './sdk-session.js';
 
@@ -471,5 +475,47 @@ describe('isEsputnikWriteTool', () => {
   it('does not flag an unrelated builtin tool', () => {
     expect(isEsputnikWriteTool('Bash')).toBe(false);
     expect(isEsputnikWriteTool('Write')).toBe(false);
+  });
+});
+
+describe('readSavedModel / saveModel / clearSavedModel', () => {
+  let dir: string;
+  let cfg: RunnerConfig;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pan-agent-model-'));
+    cfg = { modelFile: path.join(dir, 'model') } as unknown as RunnerConfig;
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns null when no override has been saved', async () => {
+    expect(await readSavedModel(cfg)).toBeNull();
+  });
+
+  it('reads back the latest save', async () => {
+    await saveModel(cfg, 'claude-sonnet-5');
+    await saveModel(cfg, 'claude-sonnet-5-5');
+    expect(await readSavedModel(cfg)).toBe('claude-sonnet-5-5');
+  });
+
+  it('clearing removes the override, and is a no-op when none exists', async () => {
+    await clearSavedModel(cfg);
+    await saveModel(cfg, 'claude-sonnet-5-5');
+    await clearSavedModel(cfg);
+    expect(await readSavedModel(cfg)).toBeNull();
+  });
+});
+
+describe('toModelChoices', () => {
+  it('prefers the resolved id over the alias and dedupes rows resolving to the same model', () => {
+    const choices = toModelChoices([
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet', description: 'alias' },
+      { value: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5', description: 'canonical' },
+      { value: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'big' },
+    ]);
+    expect(choices.map((c) => c.id)).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5']);
   });
 });

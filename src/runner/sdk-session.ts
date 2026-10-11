@@ -7,13 +7,13 @@
  * one-time query options built once at session start.
  */
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { CanUseTool, McpServerConfig, McpServerToolPolicy, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, McpServerConfig, McpServerToolPolicy, ModelInfo, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { log, truncateText } from '../shared/log.js';
-import { ESPUTNIK_SERVER_URL, type ChatMessage, type ContextUsageSummary, type EffortLevel, type TurnRequest } from '../shared/types.js';
+import { ESPUTNIK_SERVER_URL, type ChatMessage, type ModelChoice, type ContextUsageSummary, type EffortLevel, type TurnRequest } from '../shared/types.js';
 import { buildAttachmentMcpServer } from './attachment-tools.js';
 import { resolveAttachments } from './attachments.js';
 import type { RunnerConfig } from './config.js';
@@ -70,6 +70,24 @@ export async function readSavedContextLimit(cfg: RunnerConfig): Promise<number |
 
 export async function saveContextLimit(cfg: RunnerConfig, tokens: number): Promise<void> {
   await writeFile(cfg.contextLimitFile, String(tokens), 'utf8');
+}
+
+/** The person's `/model` choice, persisted on NFS for the same reason as the context limit above — null means "no override, use the operator default". */
+export async function readSavedModel(cfg: RunnerConfig): Promise<string | null> {
+  try {
+    return (await readFile(cfg.modelFile, 'utf8')).trim() || null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+export async function saveModel(cfg: RunnerConfig, model: string): Promise<void> {
+  await writeFile(cfg.modelFile, model, 'utf8');
+}
+
+export async function clearSavedModel(cfg: RunnerConfig): Promise<void> {
+  await rm(cfg.modelFile, { force: true });
 }
 
 /**
@@ -549,17 +567,18 @@ export function buildQueryOptions(
   reactable: ReactableMessageRef,
   gate: PermissionGate,
   esputnikServers: Record<string, McpServerConfig> = {},
+  model: string = cfg.model,
 ): Options {
   return {
     cwd: cfg.workspaceCwd,
     ...(sessionId ? { resume: sessionId } : {}),
     permissionMode: 'acceptEdits',
-    // Explicit rather than relying on "whatever the account/SDK currently
-    // defaults to" — confirmed live this SDK version already defaults to
-    // claude-sonnet-5 with no model set, but pinning it means a future
-    // default-model change on Anthropic's side can't silently change what
-    // every person pod runs.
-    model: 'claude-sonnet-5',
+    // Always explicit rather than "whatever the account/SDK currently
+    // defaults to", so a default-model change on Anthropic's side can't
+    // silently change what every person pod runs. The value is the
+    // operator's default (PERSON_DEFAULT_MODEL) or the person's saved
+    // /model choice — see RunnerConfig.model.
+    model,
     // Explicit rather than relying on the SDK's own default-when-omitted
     // behavior — guarantees the auto-memory instructions (and everything
     // else the preset carries) are actually present regardless of SDK
@@ -616,6 +635,21 @@ export function buildQueryOptions(
       ...TELEGRAM_EXTRAS_TOOLS,
     ],
   };
+}
+
+/**
+ * Narrows the SDK's `supportedModels()` rows to what `/model` needs. The id is the row's `resolvedModel` when it has one (the SDK lists aliases like `sonnet` that resolve to a concrete id — pinning the concrete id is what the default-model comment in `buildQueryOptions` wants), else its `value`. Deduped by id, since an alias row and its canonical row can resolve to the same model.
+ */
+export function toModelChoices(models: ModelInfo[]): ModelChoice[] {
+  const seen = new Set<string>();
+  const out: ModelChoice[] = [];
+  for (const m of models) {
+    const id = m.resolvedModel ?? m.value;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, displayName: m.displayName, description: m.description });
+  }
+  return out;
 }
 
 /** Narrows the SDK's much larger `getContextUsage()` response (category breakdowns, grid rows, per-tool/skill token costs, ...) down to what a `/context` reply actually needs, plus the two values session-controller.ts tracks itself (the SDK exposes no getter for either). */

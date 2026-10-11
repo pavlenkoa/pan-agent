@@ -19,6 +19,7 @@ import {
   type ContextUsageSummary,
   type EffortLevel,
   type EsputnikServerStatus,
+  type ModelChoice,
   type TaskTurn,
   type TurnRequest,
 } from '../shared/types.js';
@@ -27,6 +28,7 @@ import { createPermissionGate, type PermissionDecision } from './permission-gate
 import {
   buildPrompt,
   buildQueryOptions,
+  toModelChoices,
   buildUserMessage,
   logSdkMessage,
   noUpdateInstruction,
@@ -75,6 +77,12 @@ export interface SessionController {
   getContextUsage(): Promise<ContextUsageSummary>;
   /** Live control-plane write, not a turn — session-scoped only (confirmed live: not persisted to a settings file, resets to the `buildQueryOptions` default on pod restart). Throws if the session hasn't started yet. */
   setEffortLevel(level: EffortLevel): Promise<void>;
+  /** Live control-plane read of the models this account can use, via the SDK's `supportedModels()`. Throws if the session hasn't started yet. */
+  listModels(): Promise<{ models: ModelChoice[]; defaultModel: string; currentModel: string }>;
+  /**
+   * Live model switch for the rest of this session (`Query.setModel()` — same session id and transcript, only the model answering changes) and for any in-process crash-restart after it. `null` resets to `cfg.defaultModel`. Rejects an id the SDK doesn't list. Persisting the choice across pod restarts is the caller's job (runner/index.ts). Returns the model now in effect.
+   */
+  setModel(model: string | null): Promise<string>;
   /** App-enforced soft cap, not an SDK setting — see `maybeTriggerAutoCompact` below for why. Pure local state, no queryHandle needed, safe to call before the session starts. */
   setContextLimit(tokens: number): void;
   /**
@@ -204,6 +212,8 @@ export function createSessionController(
   // Tracked locally rather than read back from the SDK — it exposes no
   // getter for either (confirmed: no getSettings()-equivalent on Query).
   let effortLevel: EffortLevel = 'medium';
+  // Mutable so a /model switch survives an in-process stream restart (runSupervised rebuilds the query options each time).
+  let currentModel = cfg.model;
   // cfg.contextLimit is the operator-resolved boot-time value — this
   // person's own /context_limit override if they have one, else their
   // computed per-person default (see pod-lifecycle.ts's resolveContextLimit
@@ -575,7 +585,7 @@ ${noUpdateInstruction(
         knownEsputnikKeys = new Set(Object.keys(esputnikServers));
         dynamicEsputnikServers.clear();
         costBaseline = 0; // fresh queryFn() stream below = a fresh SDK cost counter, see costBaseline's doc comment
-        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, permissionGate, esputnikServers) });
+        const handle = queryFn({ prompt: inputQueue, options: buildQueryOptions(cfg, sessionId, reactable, permissionGate, esputnikServers, currentModel) });
         queryHandle = handle;
         await consumeQuery(handle);
         if (stopped) return;
@@ -627,6 +637,22 @@ ${noUpdateInstruction(
       if (!queryHandle) throw new Error('session not started yet');
       await queryHandle.applyFlagSettings({ effortLevel: level });
       effortLevel = level;
+    },
+    async listModels() {
+      if (!queryHandle) throw new Error('session not started yet');
+      const models = toModelChoices(await queryHandle.supportedModels());
+      return { models, defaultModel: cfg.defaultModel, currentModel };
+    },
+    async setModel(model: string | null): Promise<string> {
+      if (!queryHandle) throw new Error('session not started yet');
+      const target = model ?? cfg.defaultModel;
+      if (model !== null) {
+        const known = toModelChoices(await queryHandle.supportedModels());
+        if (!known.some((m) => m.id === target)) throw new Error(`unknown model "${target}"`);
+      }
+      await queryHandle.setModel(target);
+      currentModel = target;
+      return target;
     },
     setContextLimit(tokens: number): void {
       contextLimit = tokens;
