@@ -281,6 +281,16 @@ stdout to your log backend picks it up like any other pod.
   ignored — the model is whatever the server was started with. Speaker identification
   (who is talking) is not done: Whisper/Parakeet only transcribe; diarization exists in
   the same Core ML toolkits but is untested here.
+- **Home Assistant control is an MCP server, allowlisted per person.** Helm
+  `operator.homeAssistant.{url,slugs}` -> operator `HOME_ASSISTANT_URL/SLUGS`; only
+  slugs on the list get `PERSON_HA_URL` + `PERSON_HA_TOKEN` (secretKeyRef
+  `pan-agent-homeassistant`/`HA_TOKEN`, Vault-backed) in their pod, and the runner
+  (`buildHomeAssistantMcpServers`) then wires HA's official `mcp_server` integration
+  (`/api/mcp`, bearer long-lived token) with `mcp__home-assistant` auto-allowed. What
+  the model can touch is decided in HA (Assist "Expose" settings), not here. Egress:
+  `network.homeAssistant` (`viaHost` for a hostNetwork HA on the same node; unverified
+  against the live cluster). Needs the HA `mcp_server` integration enabled and a token
+  in Vault; adding a person = add the slug and recreate their pod.
 - **Circular imports.** `admin-commands.ts` → `provisioning.ts` already
   exists (for `/approve`). Anything both `provisioning.ts` and
   `admin-commands.ts` need (e.g. the bot-command lists) goes in a

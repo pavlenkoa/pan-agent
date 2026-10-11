@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { turnKey } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
 import {
+  buildHomeAssistantMcpServers,
   buildPrompt,
   clearSavedModel,
   isEsputnikWriteTool,
@@ -517,5 +518,18 @@ describe('toModelChoices', () => {
       { value: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'big' },
     ]);
     expect(choices.map((c) => c.id)).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5']);
+  });
+});
+
+describe('buildHomeAssistantMcpServers', () => {
+  it('is empty for people without Home Assistant', () => {
+    expect(buildHomeAssistantMcpServers({ homeAssistant: null } as unknown as RunnerConfig)).toEqual({});
+  });
+
+  it('points at /api/mcp with a bearer token', () => {
+    const cfg = { homeAssistant: { url: 'http://ha.invalid:8123/', token: 't0k' } } as unknown as RunnerConfig;
+    expect(buildHomeAssistantMcpServers(cfg)).toEqual({
+      'home-assistant': { type: 'http', url: 'http://ha.invalid:8123/api/mcp', headers: { Authorization: 'Bearer t0k' } },
+    });
   });
 });

@@ -58,6 +58,10 @@ export interface OperatorConfig {
   /** Speech-to-text endpoint handed to person pods as PERSON_TRANSCRIBE_URL — empty string means voice transcription is off. */
   transcribeUrl: string;
   transcribeModel: string;
+  /** Home Assistant base URL (e.g. http://home-assistant.home-assistant.svc:8123) — empty means the integration is off. */
+  homeAssistantUrl: string;
+  /** Only these people get the Home Assistant MCP server (and its token) in their pod. */
+  homeAssistantSlugs: string[];
 }
 
 export function loadOperatorConfig(): OperatorConfig {
@@ -88,5 +92,7 @@ export function loadOperatorConfig(): OperatorConfig {
     defaultModel: requireEnv('DEFAULT_MODEL'),
     transcribeUrl: process.env['TRANSCRIBE_URL'] ?? '',
     transcribeModel: process.env['TRANSCRIBE_MODEL'] ?? '',
+    homeAssistantUrl: process.env['HOME_ASSISTANT_URL'] ?? '',
+    homeAssistantSlugs: parseSlugList(process.env['HOME_ASSISTANT_SLUGS']),
   };
 }

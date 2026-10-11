@@ -44,6 +44,15 @@ operator:
   transcribe:
     url: ""
     model: ""
+  # Home Assistant (official MCP server integration, /api/mcp, long-lived
+  # token from Vault -> pan-agent-homeassistant). Only the listed person slugs
+  # get it; empty url or empty slugs = off for everyone.
+  homeAssistant:
+    url: ""
+    slugs: []
+    vault:
+      key: home-assistant
+      property: token
   contextLimits:
     default: 400000
     high: 700000
@@ -78,5 +87,13 @@ network:
   # disables that rule.
   transcribeCidrs: []
   transcribePort: 50060
+  # Home Assistant egress for the people on operator.homeAssistant.slugs. Use
+  # cidrs when HA has a routable address; viaHost: true when HA runs
+  # hostNetwork on the same node as the pods (traffic then arrives as the
+  # Cilium `host` entity, which a CIDR rule does not match).
+  homeAssistant:
+    cidrs: []
+    viaHost: false
+    port: 8123
   # Private ranges excluded from the pods' "allow all internet" egress rule.
   excludeCidrs: []

@@ -63,6 +63,10 @@ spec:
               value: {{ .Values.operator.transcribe.url | quote }}
             - name: TRANSCRIBE_MODEL
               value: {{ .Values.operator.transcribe.model | quote }}
+            - name: HOME_ASSISTANT_URL
+              value: {{ .Values.operator.homeAssistant.url | quote }}
+            - name: HOME_ASSISTANT_SLUGS
+              value: {{ join "," .Values.operator.homeAssistant.slugs | quote }}
             - name: DEFAULT_MODEL
               value: {{ .Values.operator.defaultModel | quote }}
             - name: DEFAULT_CONTEXT_LIMIT

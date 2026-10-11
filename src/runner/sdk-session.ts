@@ -561,6 +561,25 @@ function buildSkillsCanUseTool(cfg: RunnerConfig, gate: PermissionGate): CanUseT
   };
 }
 
+export const HOME_ASSISTANT_SERVER_KEY = 'home-assistant';
+
+/**
+ * Home Assistant's official `mcp_server` integration (streamable HTTP at
+ * `/api/mcp`, long-lived-token bearer auth). It only exposes entities the
+ * Assist "Expose" settings allow, so HA — not this runner — decides what the
+ * model can touch. Absent entirely for people not on the operator's allowlist.
+ */
+export function buildHomeAssistantMcpServers(cfg: RunnerConfig): Record<string, McpServerConfig> {
+  if (!cfg.homeAssistant) return {};
+  return {
+    [HOME_ASSISTANT_SERVER_KEY]: {
+      type: 'http',
+      url: new URL('/api/mcp', cfg.homeAssistant.url).toString(),
+      headers: { Authorization: `Bearer ${cfg.homeAssistant.token}` },
+    },
+  };
+}
+
 export function buildQueryOptions(
   cfg: RunnerConfig,
   sessionId: string | null,
@@ -618,6 +637,7 @@ export function buildQueryOptions(
       'pan-agent-scheduling': buildSchedulingMcpServer(cfg),
       'pan-agent-attachments': buildAttachmentMcpServer(cfg),
       'pan-agent-telegram-extras': buildTelegramExtrasMcpServer(cfg, reactable),
+      ...buildHomeAssistantMcpServers(cfg),
       ...esputnikServers,
     },
     allowedTools: [
@@ -633,6 +653,7 @@ export function buildQueryOptions(
       ...SCHEDULING_TOOLS,
       ...ATTACHMENT_TOOLS,
       ...TELEGRAM_EXTRAS_TOOLS,
+      ...(cfg.homeAssistant ? [`mcp__${HOME_ASSISTANT_SERVER_KEY}`] : []),
     ],
   };
 }

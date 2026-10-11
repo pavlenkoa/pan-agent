@@ -74,6 +74,28 @@ spec:
               protocol: TCP
     {{- end }}
 
+    {{- if and .Values.operator.homeAssistant.url (or .Values.network.homeAssistant.cidrs .Values.network.homeAssistant.viaHost) }}
+    # 4c. Home Assistant MCP (only pods of allowlisted people hold a token)
+    {{- if .Values.network.homeAssistant.cidrs }}
+    - toCIDRSet:
+        {{- range .Values.network.homeAssistant.cidrs }}
+        - cidr: {{ . }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.network.homeAssistant.port | quote }}
+              protocol: TCP
+    {{- end }}
+    {{- if .Values.network.homeAssistant.viaHost }}
+    - toEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: {{ .Values.network.homeAssistant.port | quote }}
+              protocol: TCP
+    {{- end }}
+    {{- end }}
+
     # 5. NFS (PV mounts)
     - toCIDR:
         - {{ .Values.nfs.server }}/32

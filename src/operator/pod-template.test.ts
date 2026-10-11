@@ -99,6 +99,27 @@ describe('buildPersonPodSpec — transcription endpoint', () => {
   });
 });
 
+describe('buildPersonPodSpec — Home Assistant', () => {
+  const ha = { ...cfg, homeAssistantUrl: 'http://ha.invalid:8123', homeAssistantSlugs: ['andrii'] };
+
+  it('gives an allowlisted person the URL and a secret-backed token', () => {
+    const pod = buildPersonPodSpec(ha, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).get('PERSON_HA_URL')).toBe('http://ha.invalid:8123');
+    expect(envMap(pod).get('PERSON_HA_TOKEN')).toEqual({ secretKeyRef: { name: 'pan-agent-homeassistant', key: 'HA_TOKEN' } });
+  });
+
+  it('gives nothing to anyone else', () => {
+    const pod = buildPersonPodSpec(ha, 'tania', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).has('PERSON_HA_URL')).toBe(false);
+    expect(envMap(pod).has('PERSON_HA_TOKEN')).toBe(false);
+  });
+
+  it('is off when no URL is configured, even for an allowlisted slug', () => {
+    const pod = buildPersonPodSpec({ ...ha, homeAssistantUrl: '' }, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).has('PERSON_HA_TOKEN')).toBe(false);
+  });
+});
+
 describe('buildPersonPodSpec — tool permissions', () => {
   it('seeds PERSON_TOOL_PERMISSIONS with the granted tool names only, never the grant value', () => {
     const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token', {}, { 'mcp__esputnik-work__create_email_message': 'always_allow' });

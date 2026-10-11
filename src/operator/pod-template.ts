@@ -25,6 +25,8 @@ export const RESERVED_ENV_NAMES = new Set([
   'PERSON_DEFAULT_MODEL',
   'PERSON_TRANSCRIBE_URL',
   'PERSON_TRANSCRIBE_MODEL',
+  'PERSON_HA_URL',
+  'PERSON_HA_TOKEN',
   'TZ',
   'LANG',
   'OPERATOR_TASKS_URL',
@@ -109,6 +111,12 @@ export function buildPersonPodSpec(
               ? [
                   { name: 'PERSON_TRANSCRIBE_URL', value: cfg.transcribeUrl },
                   { name: 'PERSON_TRANSCRIBE_MODEL', value: cfg.transcribeModel },
+                ]
+              : []),
+            ...(cfg.homeAssistantUrl && cfg.homeAssistantSlugs.includes(slug)
+              ? [
+                  { name: 'PERSON_HA_URL', value: cfg.homeAssistantUrl },
+                  secretEnv('PERSON_HA_TOKEN', 'pan-agent-homeassistant', 'HA_TOKEN'),
                 ]
               : []),
             ...customEnvEntries.map(([varName, v]) => ({ name: varName, value: v.value })),

@@ -64,6 +64,8 @@ export interface RunnerConfig {
   transcribeUrl: string | null;
   /** Sent as the request's `model` field (PERSON_TRANSCRIBE_MODEL); the server decides what it means. */
   transcribeModel: string;
+  /** Home Assistant base URL + long-lived token (PERSON_HA_URL/PERSON_HA_TOKEN) — only set for people on the operator's allowlist; null disables the integration. */
+  homeAssistant: { url: string; token: string } | null;
 }
 
 export function loadRunnerConfig(): RunnerConfig {
@@ -90,5 +92,9 @@ export function loadRunnerConfig(): RunnerConfig {
     modelFile: process.env['MODEL_FILE'] ?? `${claudeHome}/pan-agent-model`,
     transcribeUrl: process.env['PERSON_TRANSCRIBE_URL'] || null,
     transcribeModel: process.env['PERSON_TRANSCRIBE_MODEL'] ?? '',
+    homeAssistant:
+      process.env['PERSON_HA_URL'] && process.env['PERSON_HA_TOKEN']
+        ? { url: process.env['PERSON_HA_URL'], token: process.env['PERSON_HA_TOKEN'] }
+        : null,
   };
 }
