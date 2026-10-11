@@ -288,9 +288,17 @@ stdout to your log backend picks it up like any other pod.
   (`buildHomeAssistantMcpServers`) then wires HA's official `mcp_server` integration
   (`/api/mcp`, bearer long-lived token) with `mcp__home-assistant` auto-allowed. What
   the model can touch is decided in HA (Assist "Expose" settings), not here. Egress:
-  `network.homeAssistant` (`viaHost` for a hostNetwork HA on the same node; unverified
-  against the live cluster). Needs the HA `mcp_server` integration enabled and a token
-  in Vault; adding a person = add the slug and recreate their pod.
+  `network.homeAssistant` (`viaHost` for a hostNetwork HA on the same node; confirmed
+  live 2026-10-11: a person pod reaches `home-assistant.smarthome.svc:8123` through it).
+  Needs the HA "Model Context Protocol Server" integration enabled (without it
+  `/api/mcp` and `/mcp_server/sse` both 404 even with a valid token, and the model
+  just reports "no Home Assistant tools") and a token in Vault; adding a person = add
+  the slug and recreate their pod. MCP servers are connected at session start, so
+  enabling the HA integration (or fixing its URL) after a pod is already up needs a
+  pod/container restart before the tools appear. Confirmed live: `POST /api/mcp`
+  (streamable HTTP, bearer token) answers `initialize` and `tools/list` with the
+  Assist-exposed intents (`HassTurnOn/Off`, `light__HassLightSet`, ...). Those intents
+  also lock/unlock if a lock is exposed to Assist, so don't expose locks.
 - **Circular imports.** `admin-commands.ts` → `provisioning.ts` already
   exists (for `/approve`). Anything both `provisioning.ts` and
   `admin-commands.ts` need (e.g. the bot-command lists) goes in a
