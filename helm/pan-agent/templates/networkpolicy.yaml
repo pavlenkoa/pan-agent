@@ -62,6 +62,18 @@ spec:
               protocol: TCP
     {{- end }}
 
+    {{- if .Values.network.transcribeCidrs }}
+    # 4b. Speech-to-text endpoint (voice messages)
+    - toCIDRSet:
+        {{- range .Values.network.transcribeCidrs }}
+        - cidr: {{ . }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.network.transcribePort | quote }}
+              protocol: TCP
+    {{- end }}
+
     # 5. NFS (PV mounts)
     - toCIDR:
         - {{ .Values.nfs.server }}/32

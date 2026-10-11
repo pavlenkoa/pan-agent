@@ -23,6 +23,8 @@ export const RESERVED_ENV_NAMES = new Set([
   'PERSON_TOOL_PERMISSIONS',
   'PERSON_CONTEXT_LIMIT',
   'PERSON_DEFAULT_MODEL',
+  'PERSON_TRANSCRIBE_URL',
+  'PERSON_TRANSCRIBE_MODEL',
   'TZ',
   'LANG',
   'OPERATOR_TASKS_URL',
@@ -103,6 +105,12 @@ export function buildPersonPodSpec(
             { name: 'PERSON_TOOL_PERMISSIONS', value: JSON.stringify(Object.keys(toolPermissions)) },
             { name: 'PERSON_CONTEXT_LIMIT', value: String(contextLimit) },
             { name: 'PERSON_DEFAULT_MODEL', value: cfg.defaultModel },
+            ...(cfg.transcribeUrl
+              ? [
+                  { name: 'PERSON_TRANSCRIBE_URL', value: cfg.transcribeUrl },
+                  { name: 'PERSON_TRANSCRIBE_MODEL', value: cfg.transcribeModel },
+                ]
+              : []),
             ...customEnvEntries.map(([varName, v]) => ({ name: varName, value: v.value })),
           ],
           ports: [{ containerPort: RUNNER_PORT, name: 'http' }],

@@ -85,6 +85,20 @@ describe('buildPersonPodSpec — default model', () => {
   });
 });
 
+describe('buildPersonPodSpec — transcription endpoint', () => {
+  it('passes the endpoint and model to the pod when configured', () => {
+    const pod = buildPersonPodSpec({ ...cfg, transcribeUrl: 'http://host.internal:50060', transcribeModel: 'm' }, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).get('PERSON_TRANSCRIBE_URL')).toBe('http://host.internal:50060');
+    expect(envMap(pod).get('PERSON_TRANSCRIBE_MODEL')).toBe('m');
+  });
+
+  it('sets neither variable when transcription is off', () => {
+    const pod = buildPersonPodSpec({ ...cfg, transcribeUrl: '', transcribeModel: '' }, 'andrii', 1, 'UTC', 'tasks-token');
+    expect(envMap(pod).has('PERSON_TRANSCRIBE_URL')).toBe(false);
+    expect(envMap(pod).has('PERSON_TRANSCRIBE_MODEL')).toBe(false);
+  });
+});
+
 describe('buildPersonPodSpec — tool permissions', () => {
   it('seeds PERSON_TOOL_PERMISSIONS with the granted tool names only, never the grant value', () => {
     const pod = buildPersonPodSpec(cfg, 'andrii', 1, 'UTC', 'tasks-token', {}, { 'mcp__esputnik-work__create_email_message': 'always_allow' });

@@ -264,6 +264,23 @@ stdout to your log backend picks it up like any other pod.
   prompt cache is per-model so the first turn after a switch re-reads context
   uncached. To move everyone to a new Sonnet: bump `operator.defaultModel` and
   recreate the person pods (anyone with their own `/model` choice keeps it).
+- **Voice messages are transcribed, not skipped.** The operator parses Telegram
+  `voice` into a `voice` attachment (`router.ts`'s `extractAttachments`); the runner
+  (`attachments.ts`'s `describeVoice`) downloads it with the person's own bot token and
+  POSTs it to an OpenAI-compatible `/v1/audio/transcriptions` endpoint
+  (`PERSON_TRANSCRIBE_URL`, from Helm `operator.transcribe.url`; empty = off), then puts
+  the JSON-quoted transcript in the prompt as a note saying it is speech and may contain
+  recognition errors. The audio is only kept (in `workspace/inbox/`) when transcription
+  fails or isn't configured, and the model is told either way — a voice note is never
+  silently dropped. In the homelab the endpoint is WhisperKit's local server on the Mac
+  host (`host/macmini/whisperkit-server` in the homelab repo): Core ML on the Neural
+  Engine, bound to loopback only (pods reach it via `host.internal`; LAN devices are
+  refused; the server has no auth, so never bind it wider), egress allowed by
+  `network.transcribeCidrs`. Confirmed live 2026-10-11: it decodes Telegram's OGG/Opus
+  directly (no ffmpeg step), and the `model` request field must be non-empty but is
+  ignored — the model is whatever the server was started with. Speaker identification
+  (who is talking) is not done: Whisper/Parakeet only transcribe; diarization exists in
+  the same Core ML toolkits but is untested here.
 - **Circular imports.** `admin-commands.ts` → `provisioning.ts` already
   exists (for `/approve`). Anything both `provisioning.ts` and
   `admin-commands.ts` need (e.g. the bot-command lists) goes in a

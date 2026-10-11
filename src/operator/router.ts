@@ -18,7 +18,7 @@ import type { RouterDeps } from './router-deps.js';
 import type { TelegramCallbackQuery, TelegramMessage, TelegramSticker, TelegramUpdate } from './telegram.js';
 
 /** Largest photo size is last in Telegram's array; documents pass through as-is. */
-function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined {
+export function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined {
   const attachments: ChatAttachment[] = [];
   const photo = msg.photo?.at(-1);
   if (photo) attachments.push({ kind: 'photo', fileId: photo.file_id, fileName: null, mimeType: null });
@@ -28,6 +28,15 @@ function extractAttachments(msg: TelegramMessage): ChatAttachment[] | undefined 
       fileId: msg.document.file_id,
       fileName: msg.document.file_name ?? null,
       mimeType: msg.document.mime_type ?? null,
+    });
+  }
+  if (msg.voice) {
+    attachments.push({
+      kind: 'voice',
+      fileId: msg.voice.file_id,
+      fileName: null,
+      mimeType: msg.voice.mime_type ?? 'audio/ogg',
+      durationSec: msg.voice.duration,
     });
   }
   return attachments.length > 0 ? attachments : undefined;

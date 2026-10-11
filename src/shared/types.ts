@@ -10,10 +10,12 @@
 // ---------------------------------------------------------------------------
 
 export interface ChatAttachment {
-  kind: 'photo' | 'document';
+  kind: 'photo' | 'document' | 'voice';
   fileId: string;
   fileName: string | null;
   mimeType: string | null;
+  /** Voice messages only — Telegram's reported length in seconds. */
+  durationSec?: number;
 }
 
 /** What a `ChatMessage` was a Telegram-native reply to, if anything — quoted text is truncated (see REPLY_SNIPPET_MAX_LEN in router.ts), not the full original message. */

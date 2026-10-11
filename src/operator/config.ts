@@ -55,6 +55,9 @@ export interface OperatorConfig {
   highContextLimit: number;
   /** The model every person pod runs absent their own /model choice (PERSON_DEFAULT_MODEL in the pod). Bumping this plus a pod restart moves everyone who hasn't picked one. */
   defaultModel: string;
+  /** Speech-to-text endpoint handed to person pods as PERSON_TRANSCRIBE_URL — empty string means voice transcription is off. */
+  transcribeUrl: string;
+  transcribeModel: string;
 }
 
 export function loadOperatorConfig(): OperatorConfig {
@@ -83,5 +86,7 @@ export function loadOperatorConfig(): OperatorConfig {
     highContextLimitSlugs: parseSlugList(process.env['HIGH_CONTEXT_LIMIT_SLUGS']),
     highContextLimit: Number(process.env['HIGH_CONTEXT_LIMIT'] ?? 700_000),
     defaultModel: requireEnv('DEFAULT_MODEL'),
+    transcribeUrl: process.env['TRANSCRIBE_URL'] ?? '',
+    transcribeModel: process.env['TRANSCRIBE_MODEL'] ?? '',
   };
 }

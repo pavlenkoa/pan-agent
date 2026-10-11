@@ -60,6 +60,10 @@ export interface RunnerConfig {
   model: string;
   /** NFS-persisted `/model` override — same durability pattern as contextLimitFile (an env var is fixed at Pod creation, so it can't carry a change across an in-place container restart). */
   modelFile: string;
+  /** Base URL of an OpenAI-compatible speech-to-text endpoint (PERSON_TRANSCRIBE_URL) — null disables voice transcription, and voice messages are saved to the workspace instead. */
+  transcribeUrl: string | null;
+  /** Sent as the request's `model` field (PERSON_TRANSCRIBE_MODEL); the server decides what it means. */
+  transcribeModel: string;
 }
 
 export function loadRunnerConfig(): RunnerConfig {
@@ -84,5 +88,7 @@ export function loadRunnerConfig(): RunnerConfig {
     defaultModel,
     model: defaultModel,
     modelFile: process.env['MODEL_FILE'] ?? `${claudeHome}/pan-agent-model`,
+    transcribeUrl: process.env['PERSON_TRANSCRIBE_URL'] || null,
+    transcribeModel: process.env['PERSON_TRANSCRIBE_MODEL'] ?? '',
   };
 }

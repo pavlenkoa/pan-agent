@@ -31,6 +31,13 @@ export interface TelegramDocument {
   mime_type?: string;
 }
 
+/** A recorded voice message (OGG/Opus) — distinct from `audio` (music/audio files) and `video_note`. */
+export interface TelegramVoice {
+  file_id: string;
+  duration: number;
+  mime_type?: string;
+}
+
 export interface TelegramSticker {
   file_id: string;
   emoji?: string;
@@ -62,6 +69,7 @@ export interface TelegramMessage {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  voice?: TelegramVoice;
   sticker?: TelegramSticker;
   /** Present when the person used Telegram's native "reply" swipe/long-press on an earlier message (theirs, the bot's, or a third party's in principle — this bot is DM-only so in practice always one of the first two). */
   reply_to_message?: TelegramReplyToMessage;

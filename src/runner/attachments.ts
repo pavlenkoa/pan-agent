@@ -4,6 +4,8 @@
  * the person's workspace so Bash/Read can pick them up. The runner downloads
  * these itself with its own TELEGRAM_BOT_TOKEN — no operator-side file
  * handling needed, the operator only ever passes the small file_id through.
+ * Voice messages are transcribed (transcribe.ts) and arrive in the prompt as
+ * text; the audio is only kept when that can't happen.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -11,6 +13,7 @@ import path from 'node:path';
 import { log } from '../shared/log.js';
 import type { ChatAttachment } from '../shared/types.js';
 import type { RunnerConfig } from './config.js';
+import { transcribeAudio } from './transcribe.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 // Keep the /turn payload sane — Telegram already compresses `photo` sizes well under this.
@@ -40,6 +43,38 @@ function sanitizeFileName(name: string): string {
   return base.length > 0 ? base.slice(-120) : 'file';
 }
 
+async function saveToInbox(cfg: RunnerConfig, safeName: string, bytes: Buffer): Promise<string> {
+  const dir = path.join(cfg.workspaceCwd, 'inbox');
+  await mkdir(dir, { recursive: true });
+  const dest = path.join(dir, `${Date.now()}-${safeName}`);
+  await writeFile(dest, bytes);
+  return dest;
+}
+
+/**
+ * The prompt line for a voice message. The transcript is JSON-quoted so
+ * quotes/newlines in the person's speech can't break out of the note, and
+ * the note says it may contain recognition errors so the model reads it as
+ * speech (names and technical terms are where ASR slips), not as typed text.
+ * On failure the audio is saved and the model is told, never silently dropped.
+ */
+async function describeVoice(cfg: RunnerConfig, att: ChatAttachment, bytes: Buffer): Promise<string> {
+  const dur = att.durationSec != null ? ` (${att.durationSec}s)` : '';
+  if (cfg.transcribeUrl) {
+    try {
+      const text = await transcribeAudio(cfg, bytes);
+      if (!text) return `[the user sent a voice message${dur} with no recognizable speech]`;
+      return `[voice message${dur} from the user, transcribed automatically — it may contain recognition errors, especially names and technical terms; treat it as what they said: ${JSON.stringify(text)}]`;
+    } catch (err) {
+      log.error('voice_transcription_failed', err, { person: cfg.slug });
+    }
+  }
+  const dest = await saveToInbox(cfg, `voice-${att.fileId.slice(-8)}.ogg`, bytes);
+  return cfg.transcribeUrl
+    ? `[the user sent a voice message${dur} that couldn't be transcribed right now — saved to ${dest}; tell them, and ask them to resend or type it]`
+    : `[the user sent a voice message${dur}, but speech-to-text isn't set up here — saved to ${dest}]`;
+}
+
 export interface ImageBlock {
   type: 'image';
   source: { type: 'base64'; media_type: 'image/jpeg'; data: string };
@@ -66,12 +101,10 @@ export async function resolveAttachments(cfg: RunnerConfig, attachments: ChatAtt
           continue;
         }
         images.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bytes.toString('base64') } });
+      } else if (att.kind === 'voice') {
+        notes.push(await describeVoice(cfg, att, bytes));
       } else {
-        const safeName = sanitizeFileName(att.fileName ?? path.basename(filePath));
-        const dir = path.join(cfg.workspaceCwd, 'inbox');
-        await mkdir(dir, { recursive: true });
-        const dest = path.join(dir, `${Date.now()}-${safeName}`);
-        await writeFile(dest, bytes);
+        const dest = await saveToInbox(cfg, sanitizeFileName(att.fileName ?? path.basename(filePath)), bytes);
         notes.push(`[user sent a file, saved to ${dest}]`);
       }
     } catch (err) {

@@ -36,6 +36,14 @@ operator:
   # (and restart the person pods) to move everyone who hasn't picked one;
   # non-admin people can only /model-switch among Sonnet models.
   defaultModel: claude-sonnet-5-5
+  # Speech-to-text for voice messages: an OpenAI-compatible
+  # /v1/audio/transcriptions endpoint the person pods can reach (in the
+  # homelab, WhisperKit's local server on the Mac host). Both empty = voice
+  # transcription off (voice notes are saved to the workspace and the model
+  # is told). `model` is passed through as the request's `model` field.
+  transcribe:
+    url: ""
+    model: ""
   contextLimits:
     default: 400000
     high: 700000
@@ -65,5 +73,10 @@ network:
   qbittorrentNamespace: qbittorrent
   # Emby reachability (e.g. the OrbStack host.internal range). Empty disables that egress rule.
   embyCidrs: []
+  # Where the speech-to-text endpoint (operator.transcribe.url) lives, for
+  # the pods' egress policy — e.g. the OrbStack host.internal address. Empty
+  # disables that rule.
+  transcribeCidrs: []
+  transcribePort: 50060
   # Private ranges excluded from the pods' "allow all internet" egress rule.
   excludeCidrs: []
