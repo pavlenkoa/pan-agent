@@ -20,9 +20,27 @@ export function truncateText(text: string): { text: string; bytes: number } {
 
 const LOG_THINKING = process.env['LOG_THINKING'] === 'true';
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const ERROR_EVT = /_(failed|fatal|error|exhausted|gave_up|crashed|unauthorized|timed_out)$/;
+
+/**
+ * Loki (and the Grafana Logs panel) read a top-level `level` field to colour and
+ * filter lines; without it every line shows as UNK. Call sites mostly only set
+ * `evt`, so derive the level from it: failure-shaped events are errors, a failed
+ * tool call is a warning, everything else is info. A call site can still pass an
+ * explicit `level`.
+ */
+export function levelFor(evt: string, fields: LogFields): LogLevel {
+  if (evt === 'thinking') return 'debug';
+  if (ERROR_EVT.test(evt)) return 'error';
+  if (fields['ok'] === false) return evt === 'tool_result' ? 'warn' : 'error';
+  return 'info';
+}
+
 export function logLine(evt: string, fields: LogFields = {}): void {
   if (evt === 'thinking' && !LOG_THINKING) return;
-  const line = { evt, ts: new Date().toISOString(), ...fields };
+  const line = { evt, ts: new Date().toISOString(), level: levelFor(evt, fields), ...fields };
   process.stdout.write(JSON.stringify(line) + '\n');
 }
 
